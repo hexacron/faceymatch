@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "note": "Weight files are gitignored and provisioned per install. Every .onnx placed in models/ must be listed here with its real SHA-256, or startup refuses (invariant 8). Entries are added when the weights are provisioned in M1; fabricated digests would defeat the check.",
+  "models": []
+}

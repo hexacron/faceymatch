@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / frontend build
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Model weights: never commit ONNX files. The lock file IS tracked, since the
+# startup check verifies every weight's SHA-256 and license against it.
+models/*
+!models/models.lock
+
+# Local data. Media is content-addressed, the DB holds all derived rows.
+media/
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Test fixtures (FIXTURES_DIR). Never commit face images.
+fixtures/
+
+# Local config and secrets
+.env
+.env.*
+!.env.example
+
+# OS noise
+.DS_Store
+
+# Stray import artifact
+files.zip

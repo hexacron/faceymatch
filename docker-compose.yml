@@ -1,0 +1,63 @@
+# x86 Beelink deployment. Apple Silicon runs natively via uv (no CoreML EP in
+# the Linux image). One service only: no Redis, no Postgres, no Node runtime.
+services:
+  faceymatch:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: faceymatch:latest
+    container_name: faceymatch
+    restart: unless-stopped
+
+    # Host networking is REQUIRED, not a convenience: the app binds loopback by
+    # design (invariant 11), so the container's loopback must BE the host's
+    # loopback. With host networking there is no publish hop, and there is
+    # deliberately no `ports:` key -- a publish rule would forward to nothing
+    # here, so do not re-add one. Binding 0.0.0.0 inside the container is
+    # explicitly rejected: the invariant is about what the socket accepts, not
+    # about what a publish filter happens to hide today. Remote access is a
+    # `tailscale serve` proxy onto host loopback.
+    #
+    # This service is Linux-only (the x86 Beelink). Apple Silicon does NOT use
+    # it: run `uv run uvicorn app.main:app` natively from backend/, where
+    # onnxruntime has the CoreML execution provider.
+    #
+    # Spec section 12: block egress at the NETWORK level, not in app code.
+    # Under host networking that is a host firewall rule (deny outbound for
+    # this host / this uid), not a bridge-subnet rule. The image makes no
+    # outbound calls (C1, invariant 1); the firewall rule enforces it.
+    network_mode: host
+
+    volumes:
+      # Content-addressed original media and aligned 112x112 crops.
+      - media:/app/media
+      # SQLite DB (+ WAL) and the audit chain.
+      - data:/app/data
+      # Model weights are never baked into the image and never committed. Mount
+      # them read-only; startup verifies each SHA-256 and license against
+      # models.lock and refuses to start on mismatch (invariant 8).
+      - ./models:/app/models:ro
+
+    # Env names are the unprefixed pydantic-settings field names from
+    # backend/app/config.py.
+    environment:
+      # Non-commercial weights (buffalo_l) stay off unless explicitly allowed
+      # (C7, invariant 9). Shipped default is the SFace embedder.
+      ALLOW_NONCOMMERCIAL_MODELS: "false"
+      EMBEDDER_MODEL: sface-2021dec
+      DETECTOR_MODEL: yunet-2023mar
+      # No CoreML EP in this Linux image; Apple Silicon runs natively via uv.
+      EXECUTION_PROVIDER: CPUExecutionProvider
+      DB_PATH: /app/data/facematch.db
+      MEDIA_DIR: /app/media
+      CROPS_DIR: /app/media/crops
+      MODELS_DIR: /app/models
+      FRONTEND_DIST: /app/frontend/dist
+
+    # Single writer, single worker: the audit log is hash-chained and every
+    # append must serialize behind the previous hash (invariant 6).
+    stop_grace_period: 30s
+
+volumes:
+  media:
+  data:

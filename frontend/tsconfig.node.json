@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    // A referenced project may not disable emit (TS6310), so this one emits
+    // declarations for vite.config.ts into a scratch dir under node_modules.
+    "composite": true,
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
+    "outDir": "./node_modules/.tmp/tsconfig.node.out",
+    "emitDeclarationOnly": true,
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "types": ["node"],
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["vite.config.ts"]
+}
