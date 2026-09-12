@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app import audit, models_lock
-from app.config import Settings
+from app.config import REPO_ROOT, Settings
 from app.db.conn import transaction
 from tests.conftest import insert_match, seed_gallery
 
@@ -208,6 +208,27 @@ def test_shipped_default_embedder_is_permissively_licensed(settings: Settings) -
     """A fresh install must not require the non-commercial flag to run."""
     assert settings.embedder_model == "sface-2021dec"
     assert settings.allow_noncommercial_models is False
+
+
+def test_tracked_models_lock_keeps_a_fresh_clone_legal() -> None:
+    """The committed lock must let the default models load with the flag off (C7).
+
+    Reads the real models/models.lock, not a fixture: this is the file that decides
+    whether a fresh clone starts in a permissively licensed state.
+    """
+    lock = models_lock.load(REPO_ROOT / "models")
+    defaults = Settings()
+    for model_id in (defaults.embedder_model, defaults.detector_model):
+        entry = lock.by_id(model_id)
+        assert entry is not None, f"{model_id} missing from models.lock"
+        assert entry.commercial_use, f"{model_id} is the default but is not commercial-safe"
+        # assert_loadable must not raise with allow_noncommercial_models = False.
+        models_lock.assert_loadable(lock, model_id, defaults)
+
+    for entry in lock.models:
+        if not entry.commercial_use:
+            with pytest.raises(models_lock.ModelLicenseError):
+                models_lock.assert_loadable(lock, entry.id, defaults)
 
 
 # Invariant 11: bind to 127.0.0.1 only.

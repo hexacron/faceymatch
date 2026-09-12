@@ -9,6 +9,8 @@ dependencies = [
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "sqlite-vec>=0.1.6",
+    "onnxruntime>=1.30.0",
+    "numpy>=2.5.3",
 ]
 
 [project.optional-dependencies]

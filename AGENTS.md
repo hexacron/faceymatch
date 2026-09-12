@@ -44,6 +44,10 @@ uv run python -m app.worker      # job worker, separate process
 uv run python -m app.cli check   # startup checks: schema, models.lock
 uv run python -m app.cli verify-audit
 
+# weights: build-time only, digest-pinned, never fetched at runtime (C1)
+uv run --python 3.12 --no-project python tools/fetch_models.py       # from repo root
+uv run --python 3.12 --no-project python tools/fetch_models.py --allow-noncommercial
+
 cd frontend && bun install && bun run build   # output frontend/dist, served by the backend
 
 docker compose up                # x86 Beelink only; Apple Silicon runs natively (CoreML EP)

@@ -463,7 +463,10 @@ face-match/
     app/db/            conn.py, migrate.py, migrations/, vec.py
     app/audit.py
     app/worker.py
-  models/              ONNX files (gitignored) + models.lock
+  models/              ONNX files (gitignored) + models.lock (tracked)
+  tools/fetch_models.py  build-time weight provisioning, pinned by SHA-256.
+                       Standalone: imports nothing from app/, so the runtime
+                       package contains no download code at all (C1).
   eval/
   docs/spec.md
   docker-compose.yml
