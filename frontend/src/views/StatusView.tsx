@@ -61,19 +61,24 @@ export default function StatusView() {
 }
 
 function HealthPanel({ health, onReload }: { health: Health; onReload: () => void }) {
-  const { embedder, detector, threshold_set: thresholdSet } = health;
-  const autoAcceptOff = thresholdSet === null || !thresholdSet.calibrated;
+  const { embedder, detector, threshold_set: thresholdSet, auto_accept: autoAccept } = health;
 
   return (
     <div className="panel">
-      {autoAcceptOff && (
+      {/* The backend decides the C5 gate; re-deriving it from the threshold set
+          alone would miss the other states that close it, such as a re-embed in
+          flight after a model change. */}
+      {!autoAccept.allowed && (
         <div className="notice error banner">
           <strong>Auto-accept is off.</strong>{" "}
-          {thresholdSet === null
-            ? "No threshold set is active"
-            : "The active threshold set is not calibrated"}
-          , so every match stays a candidate and nothing is accepted automatically (C5).
-          Run a calibration, then activate its threshold set below.
+          {autoAccept.reason ?? "The backend did not give a reason"}, so every match stays a
+          candidate and nothing is accepted automatically (C5). Run a calibration, then activate its
+          threshold set below.
+        </div>
+      )}
+      {autoAccept.allowed && autoAccept.warning !== null && (
+        <div className="notice attention banner">
+          <strong>Auto-accept is on.</strong> {autoAccept.warning}
         </div>
       )}
       <dl className="facts">
