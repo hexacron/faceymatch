@@ -241,6 +241,23 @@ def test_review_recall_reports_shortfall_instead_of_faking_the_target() -> None:
     assert recall == pytest.approx(0.25)
 
 
+def test_review_recall_ceiling_keeps_the_answer_strictly_below_it() -> None:
+    """t_possible must never land on t_strong: that deletes the review band."""
+    mated = np.arange(1, 11, dtype=np.float64) / 10.0
+    correct = np.ones(10, dtype=bool)
+
+    unrestricted, _ = metrics.threshold_for_review_recall(mated, correct, 0.2)
+    capped, recall = metrics.threshold_for_review_recall(
+        mated, correct, 0.2, ceiling=0.55
+    )
+
+    assert unrestricted == pytest.approx(0.9)  # 2 of 10 needed
+    assert capped == pytest.approx(0.5)  # highest correct score below the ceiling
+    assert capped < 0.55
+    # Lowering the threshold can only add recall, so the target still holds.
+    assert recall >= 0.2
+
+
 # --- margin ------------------------------------------------------------------
 
 
@@ -297,8 +314,13 @@ def test_choose_thresholds_meets_the_fpir_target_and_band_ordering() -> None:
         impostor_gaps=np.linspace(0.0, 0.08, 2000),
     )
 
-    # Spec 6.4 and the threshold_sets CHECK both require this ordering.
-    assert choice.t_strong >= choice.t_possible
+    # 2000 non-mated probes resolve a 1e-2 target, so this is a measurement.
+    assert choice.t_strong_route == metrics.ROUTE_MEASURED_FPIR
+    assert choice.fpir_resolvable is True
+    # Spec 6.4 and the threshold_sets CHECK require the ordering; the band also has
+    # to have width, or nothing is ever routed to review.
+    assert choice.t_strong > choice.t_possible
+    assert choice.review_band_width > 0.0
     assert choice.margin >= 0.0
     # The FPIR target is the binding promise behind auto-accept.
     assert choice.fpir_at_t_strong <= 1e-2
@@ -311,7 +333,7 @@ def test_choose_thresholds_meets_the_fpir_target_and_band_ordering() -> None:
 
 def test_choose_thresholds_keeps_recall_threshold_below_strong() -> None:
     # A high FPIR threshold and low review threshold are compatible: the possible band
-    # intentionally spans the interval between them, so no clamp should destroy recall.
+    # intentionally spans the interval between them.
     mated = np.linspace(0.30, 0.95, 100)
     correct = np.ones(100, dtype=bool)
     # Non-mated probes score high: the FPIR target forces t_strong up to ~0.9.
@@ -327,11 +349,11 @@ def test_choose_thresholds_keeps_recall_threshold_below_strong() -> None:
     )
 
     assert choice.t_strong > choice.t_possible
-    assert not any("clamped" in note for note in choice.notes)
+    assert choice.review_band_width > 0.0
     assert choice.review_recall_at_t_possible >= 0.95
 
 
-def test_choose_thresholds_flags_an_unresolvable_fpir_target() -> None:
+def test_an_unresolvable_target_with_no_pair_data_is_not_claimed_as_met() -> None:
     choice = metrics.choose_thresholds(
         mated_top1=np.linspace(0.6, 0.9, 20),
         mated_rank1_correct=np.ones(20, dtype=bool),
@@ -341,10 +363,127 @@ def test_choose_thresholds_flags_an_unresolvable_fpir_target() -> None:
         review_recall_target=0.9,
     )
 
-    # 20 non-mated probes cannot measure a 1e-3 rate; the report must say that
-    # rather than imply the number was measured.
+    # 20 non-mated probes cannot measure a 1e-3 rate and no impostor pairs were
+    # supplied, so the target is not demonstrated by anything and the report says so.
+    assert choice.t_strong_route == metrics.ROUTE_UNRESOLVED_BOUND
+    assert choice.fpir_resolvable is False
     assert any("cannot resolve" in note for note in choice.notes)
+    assert any("NOT demonstrated" in note for note in choice.notes)
+    # The measured figure is still reported, but it is a resolution floor: zero false
+    # positives in 20 tries, which is exactly what fpir_resolvable=False marks.
     assert choice.fpir_at_t_strong == 0.0
+    assert choice.fpir_bound_at_t_strong is None
+
+
+def test_a_small_probe_set_falls_back_to_the_impostor_tail() -> None:
+    """The route that fixes the real bug: too few probes, plenty of pairs."""
+    rng = np.random.default_rng(3)
+    mated = np.asarray(rng.normal(0.70, 0.06, 200), dtype=np.float64)
+    correct = np.ones(200, dtype=bool)
+    # 40 non-mated probes: nowhere near the ~1000 a 1e-3 target needs.
+    nonmated = np.asarray(rng.normal(0.20, 0.05, 40), dtype=np.float64)
+    # 40k impostor pairs with a tail that reaches well past the probe maximum, which
+    # is the situation that made the old policy pick a threshold inside the tail.
+    impostor = np.concatenate(
+        [
+            np.asarray(rng.normal(0.10, 0.06, 39_900), dtype=np.float64),
+            np.linspace(0.45, 0.75, 100),
+        ]
+    )
+
+    choice = metrics.choose_thresholds(
+        mated_top1=mated,
+        mated_rank1_correct=correct,
+        nonmated_top1=nonmated,
+        gallery_size=10,
+        fpir_target=1e-3,
+        impostor=impostor,
+        comparisons_per_probe=14,
+    )
+
+    assert choice.t_strong_route == metrics.ROUTE_IMPOSTOR_TAIL_BOUND
+    assert choice.fpir_resolvable is False
+    assert choice.impostor_pairs == impostor.size
+    assert choice.comparisons_per_probe == 14
+    # The promise that matters: per-probe FPIR at the evaluated comparison count.
+    assert choice.fpir_bound_at_t_strong is not None
+    assert choice.fpir_bound_at_t_strong <= 1e-3
+    assert choice.fmr_at_t_strong is not None
+    assert metrics.fpir_from_fmr(choice.fmr_at_t_strong, 14) == pytest.approx(
+        choice.fpir_bound_at_t_strong
+    )
+    # And the threshold is above the impostor tail rather than buried in it: the old
+    # policy chose just above the worst of 40 probes, which this must beat.
+    assert choice.t_strong > float(nonmated.max())
+    assert metrics.fmr_at_threshold(impostor, choice.t_strong) <= 1e-3
+    assert choice.review_band_width > 0.0
+    assert any("impostor-pair tail" in note for note in choice.notes)
+
+
+def test_an_observed_non_mated_probe_above_the_derived_threshold_wins() -> None:
+    """Observed beats derived: a real probe over the bound raises t_strong."""
+    rng = np.random.default_rng(5)
+    impostor = np.asarray(rng.normal(0.05, 0.04, 40_000), dtype=np.float64)
+    # One non-mated probe scores far above anything in the pair population.
+    nonmated = np.concatenate([np.linspace(0.1, 0.3, 39), np.array([0.92])])
+
+    choice = metrics.choose_thresholds(
+        mated_top1=np.linspace(0.5, 0.99, 100),
+        mated_rank1_correct=np.ones(100, dtype=bool),
+        nonmated_top1=nonmated,
+        gallery_size=10,
+        fpir_target=1e-3,
+        impostor=impostor,
+        comparisons_per_probe=10,
+    )
+
+    assert choice.t_strong > 0.92
+    assert metrics.fpir_at_threshold(nonmated, choice.t_strong) == 0.0
+    assert any("observed beats derived" in note for note in choice.notes)
+
+
+def test_the_fpir_target_wins_over_recall_without_collapsing_the_band() -> None:
+    """When the two conflict, t_strong holds and t_possible drops strictly beneath."""
+    # Mated probes sit low, so the recall-driven threshold wants to be under 0.5 --
+    # but the impostor tail forces t_strong up around 0.8, above every mated score.
+    rng = np.random.default_rng(9)
+    mated = np.asarray(rng.normal(0.40, 0.05, 200), dtype=np.float64)
+    correct = np.ones(200, dtype=bool)
+    nonmated = np.asarray(rng.normal(0.15, 0.05, 40), dtype=np.float64)
+    impostor = np.concatenate(
+        [
+            np.asarray(rng.normal(0.10, 0.05, 39_900), dtype=np.float64),
+            np.linspace(0.60, 0.85, 100),
+        ]
+    )
+
+    choice = metrics.choose_thresholds(
+        mated_top1=mated,
+        mated_rank1_correct=correct,
+        nonmated_top1=nonmated,
+        gallery_size=10,
+        fpir_target=1e-3,
+        review_recall_target=0.95,
+        impostor=impostor,
+        comparisons_per_probe=10,
+    )
+
+    assert choice.t_strong > float(mated.max())  # nothing can auto-accept here
+    assert choice.t_possible < choice.t_strong  # but review still has a band
+    assert choice.review_band_width > 0.0
+    assert choice.review_recall_at_t_possible >= 0.95
+    assert choice.fpir_bound_at_t_strong is not None
+    assert choice.fpir_bound_at_t_strong <= 1e-3
+
+
+def test_fmr_to_fpir_conversion_round_trips_and_grows_with_the_gallery() -> None:
+    """FPIR is FMR inflated by the number of comparisons a probe faces."""
+    assert metrics.fpir_from_fmr(1e-4, 1) == pytest.approx(1e-4)
+    assert metrics.fpir_from_fmr(1e-4, 20) > metrics.fpir_from_fmr(1e-4, 10)
+    assert metrics.fpir_from_fmr(metrics.fmr_for_fpir(1e-3, 14), 14) == pytest.approx(
+        1e-3
+    )
+    assert metrics.fmr_for_fpir(1e-3, 14) < 1e-3
 
 
 def test_choose_thresholds_is_monotone_in_the_fpir_target() -> None:

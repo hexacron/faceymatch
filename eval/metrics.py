@@ -29,6 +29,13 @@ Threshold convention throughout: a score is *accepted* at threshold t when
 target on the evaluated data, choosing the least restrictive such value, so a
 reported rate is an achieved rate on the eval set and never an interpolation.
 
+Measured versus bounded: observing a rate of `p` takes on the order of `1/p`
+samples, so a fixture set with a few dozen non-mated probes cannot measure a 1e-3
+FPIR at all. Where that happens the policy derives the threshold from the much
+larger impostor-*pair* population and converts per-comparison FMR to per-probe FPIR
+(`fpir_from_fmr`), and the result is labelled a bound. A rate is never reported as
+measured when it was bounded; `ThresholdChoice.t_strong_route` says which it was.
+
 Scores are cosine similarities of L2-normalized embeddings, so they live in
 [-1, 1]; `SCORE_FLOOR` is the "accept everything" threshold.
 """
@@ -142,6 +149,57 @@ def threshold_at_rate(scores: ArrayLike, rate_target: float) -> float:
 def fmr_at_threshold(impostor: ArrayLike, threshold: float) -> float:
     """False match rate: fraction of impostor pairs accepted at `threshold`."""
     return rate_at_or_above(impostor, threshold)
+
+
+def fpir_from_fmr(fmr: float, comparisons: int) -> float:
+    """Per-probe FPIR implied by a per-comparison FMR over `comparisons` templates.
+
+    A probe is scored against every active template and the person score is the max
+    over that person's templates (spec 6.4), so a non-mated probe is falsely matched
+    when *any* comparison lands above threshold. Treating the comparisons as
+    independent gives `1 - (1 - FMR)^comparisons`, which is the standard open-set
+    inflation of a verification error rate and is the direction that matters: FPIR is
+    always at least FMR and grows with the gallery.
+
+    Independence is an approximation (templates of one person correlate), and it is a
+    conservative one for this purpose: correlated comparisons produce fewer distinct
+    chances to fail, so the true FPIR is at or below this figure.
+    """
+    if not 0.0 <= fmr <= 1.0:
+        raise ValueError(f"fmr must be in [0, 1], got {fmr}")
+    if comparisons <= 0:
+        raise ValueError(f"comparisons must be positive, got {comparisons}")
+    return float(1.0 - (1.0 - fmr) ** comparisons)
+
+
+def fmr_for_fpir(fpir_target: float, comparisons: int) -> float:
+    """Inverse of `fpir_from_fmr`: the per-comparison FMR a probe-level target allows."""
+    if not 0.0 <= fpir_target <= 1.0:
+        raise ValueError(f"fpir_target must be in [0, 1], got {fpir_target}")
+    if comparisons <= 0:
+        raise ValueError(f"comparisons must be positive, got {comparisons}")
+    return float(1.0 - (1.0 - fpir_target) ** (1.0 / comparisons))
+
+
+def threshold_for_fpir_bound(
+    impostor: ArrayLike, *, fpir_target: float, comparisons: int
+) -> tuple[float, float, float]:
+    """Threshold meeting a probe-level FPIR target, derived from impostor *pairs*.
+
+    Use when the non-mated probe population is too small to resolve `fpir_target`
+    (see `threshold_at_rate`). Verification impostor pairs are far more numerous than
+    non-mated probes — every cross-identity sample pair is one — so the tail that
+    open-set false positives come from is measurable there even when it is invisible
+    in the probe population.
+
+    Returns (threshold, achieved FMR at that threshold, implied per-probe FPIR). The
+    FPIR figure is a *bound derived from* a measured FMR, not a measured FPIR, and
+    callers are expected to label it as such.
+    """
+    per_comparison = fmr_for_fpir(fpir_target, comparisons)
+    threshold = threshold_at_rate(impostor, per_comparison)
+    achieved_fmr = fmr_at_threshold(impostor, threshold)
+    return threshold, achieved_fmr, fpir_from_fmr(achieved_fmr, comparisons)
 
 
 def fnmr_at_threshold(genuine: ArrayLike, threshold: float) -> float:
@@ -277,7 +335,11 @@ def fpir_fnir_curve(
 
 
 def threshold_for_review_recall(
-    mated_top1: ArrayLike, mated_rank1_correct: ArrayLike, recall_target: float
+    mated_top1: ArrayLike,
+    mated_rank1_correct: ArrayLike,
+    recall_target: float,
+    *,
+    ceiling: float | None = None,
 ) -> tuple[float, float]:
     """Highest threshold whose rank-1 recall over mated probes is >= target.
 
@@ -292,6 +354,11 @@ def threshold_for_review_recall(
     correct at rank 1 the target is unreachable at any threshold; the floor is
     returned with the achieved recall so the caller can report the shortfall
     instead of pretending the target was met.
+
+    `ceiling` (in practice `t_strong`) forces the answer strictly below it, so the
+    review band keeps real width instead of collapsing onto the auto-accept
+    threshold. Recall is monotone non-increasing in the threshold, so the highest
+    candidate below the ceiling can only recall more than the unrestricted answer.
     """
     if not 0.0 <= recall_target <= 1.0:
         raise ValueError(f"recall_target must be in [0, 1], got {recall_target}")
@@ -307,6 +374,11 @@ def threshold_for_review_recall(
         threshold = SCORE_FLOOR
     else:
         threshold = float(correct_scores[needed - 1])
+    if ceiling is not None and threshold >= ceiling:
+        below = correct_scores[correct_scores < ceiling]
+        threshold = (
+            float(below[0]) if below.size else float(np.nextafter(ceiling, -np.inf))
+        )
     return threshold, dir_at_threshold(scores, correct, threshold)
 
 
@@ -371,9 +443,25 @@ def choose_margin(
     return float(margin), tuple(notes)
 
 
+# How `t_strong` was chosen, recorded on every report so a reviewer can tell a
+# measurement from a bound without re-deriving it.
+ROUTE_MEASURED_FPIR = "measured_fpir"
+ROUTE_IMPOSTOR_TAIL_BOUND = "impostor_tail_bound"
+ROUTE_UNRESOLVED_BOUND = "unresolved_bound"
+
+
 @dataclass(frozen=True, slots=True)
 class ThresholdChoice:
-    """The chosen threshold set plus the rates that justify it."""
+    """The chosen threshold set plus the rates that justify it.
+
+    Two of the fields are deliberately separate because they are different claims:
+    `fpir_at_t_strong` is measured over the non-mated probes that were actually
+    observed, and `fpir_bound_at_t_strong` is derived from the measured impostor-pair
+    FMR through `fpir_from_fmr`. When the probe population cannot resolve the target
+    (`fpir_resolvable` is false) the measured figure is a zero that means "no false
+    positive in n tries" and nothing more, and the bound is the number that carries
+    the promise. `t_strong_route` says which one `t_strong` came from.
+    """
 
     t_strong: float
     t_possible: float
@@ -386,7 +474,18 @@ class ThresholdChoice:
     gallery_size: int
     mated_probes: int
     nonmated_probes: int
+    t_strong_route: str
+    fpir_resolvable: bool
+    comparisons_per_probe: int
+    impostor_pairs: int
+    fmr_at_t_strong: float | None
+    fpir_bound_at_t_strong: float | None
     notes: tuple[str, ...]
+
+    @property
+    def review_band_width(self) -> float:
+        """How much score room the `possible` band actually covers."""
+        return self.t_strong - self.t_possible
 
     def as_json(self) -> dict[str, object]:
         return {
@@ -396,11 +495,18 @@ class ThresholdChoice:
             "fpir_at_t_strong": self.fpir_at_t_strong,
             "fnir_at_t_strong": self.fnir_at_t_strong,
             "review_recall_at_t_possible": self.review_recall_at_t_possible,
+            "review_band_width": self.review_band_width,
             "fpir_target": self.fpir_target,
             "review_recall_target": self.review_recall_target,
             "gallery_size": self.gallery_size,
             "mated_probes": self.mated_probes,
             "nonmated_probes": self.nonmated_probes,
+            "t_strong_route": self.t_strong_route,
+            "fpir_resolvable": self.fpir_resolvable,
+            "comparisons_per_probe": self.comparisons_per_probe,
+            "impostor_pairs": self.impostor_pairs,
+            "fmr_at_t_strong": self.fmr_at_t_strong,
+            "fpir_bound_at_t_strong": self.fpir_bound_at_t_strong,
             "notes": list(self.notes),
         }
 
@@ -415,55 +521,129 @@ def choose_thresholds(
     review_recall_target: float = DEFAULT_REVIEW_RECALL_TARGET,
     genuine_gaps: ArrayLike | None = None,
     impostor_gaps: ArrayLike | None = None,
+    impostor: ArrayLike | None = None,
+    comparisons_per_probe: int | None = None,
     margin_genuine_quantile: float = DEFAULT_MARGIN_GENUINE_QUANTILE,
 ) -> ThresholdChoice:
     """The spec section 10 threshold policy, as one auditable decision.
 
-    - `t_strong` is the lowest score whose false positive *identification* rate over
-      the non-mated probes is at or below `fpir_target` at the evaluated
-      `gallery_size`. It is an identification rate, not a verification FMR: the
-      population is "probes of people who were never enrolled", which is the
-      population auto-accept actually faces.
-    - `t_possible` is the highest score that still recalls `review_recall_target` of
-      the mated probes at rank 1, so the review queue keeps that recall while
-      staying as small as possible.
-    - `margin` comes from the observed top1-top2 separation (`choose_margin`).
-    - Finally `t_possible` is clamped to at most `t_strong`. The band rules and the
-      `threshold_sets` CHECK both require `t_strong >= t_possible`; when the FPIR
-      target forces `t_strong` below the recall point, recall is what gives way,
-      and the clamp is recorded in `notes`.
+    `t_strong` bounds the false positive *identification* rate: the population that
+    matters is "probes of people who were never enrolled", which is what auto-accept
+    faces. It is chosen by one of two routes, and which one is recorded:
 
-    Every returned rate is measured at the returned threshold on the supplied data.
+    - `measured_fpir`, when the non-mated probes can resolve the target. Observing a
+      rate of `p` needs on the order of `1/p` samples, so this route requires
+      `nonmated >= 1 / fpir_target`. `t_strong` is then the least restrictive
+      threshold whose measured FPIR is within target.
+    - `impostor_tail_bound`, when they cannot. A target of 1e-3 needs ~1000 non-mated
+      probes and a fixture set rarely has them, so the old behaviour — a threshold
+      just above the worst of a few dozen probes, reported with FPIR 0.0 — promised a
+      rate it had never observed. Verification impostor *pairs* are far more numerous
+      (every cross-identity pair is one), so the tail is measurable there: take the
+      per-comparison FMR the probe-level target allows over `comparisons_per_probe`
+      templates (`fmr_for_fpir`), find the threshold that meets it, and report the
+      implied FPIR as a bound rather than as a measurement.
+    - `unresolved_bound`, when neither population can resolve the target. The
+      conservative bound is still returned, and the notes say plainly that the target
+      is not demonstrated at all.
+
+    `t_possible` is the highest score that still recalls `review_recall_target` of the
+    mated probes at rank 1, and it is always strictly below `t_strong`. When the two
+    conflict the FPIR target wins on `t_strong` and `t_possible` drops to the highest
+    recall-driven value beneath it: collapsing them onto each other would delete the
+    band that routes uncertain matches to a human, which is the wrong failure
+    direction for an investigative tool. Any recall shortfall is reported, never
+    silently absorbed.
+
+    `margin` comes from the observed top1-top2 separation (`choose_margin`).
     """
     mated = _require_nonempty(as_scores(mated_top1), "mated_top1")
     correct = _as_bool(mated_rank1_correct, mated.size)
     nonmated = _require_nonempty(as_scores(nonmated_top1), "nonmated_top1")
     if gallery_size <= 0:
         raise ValueError(f"gallery_size must be positive, got {gallery_size}")
+    comparisons = gallery_size if comparisons_per_probe is None else comparisons_per_probe
+    if comparisons <= 0:
+        raise ValueError(f"comparisons_per_probe must be positive, got {comparisons}")
+    impostor_scores = (
+        as_scores(impostor, name="impostor") if impostor is not None else np.empty(0)
+    )
 
     notes: list[str] = []
-    if fpir_target > 0.0 and nonmated.size < 1.0 / fpir_target:
-        notes.append(
-            f"{nonmated.size} non-mated probes cannot resolve FPIR={fpir_target:g}; "
-            f"t_strong is a conservative bound above the worst observed non-mated "
-            f"score, not a measurement at that rate"
-        )
+    resolvable = fpir_target > 0.0 and nonmated.size >= 1.0 / fpir_target
+    nonmated_bound = threshold_at_rate(nonmated, fpir_target)
+    fmr_at_t_strong: float | None = None
+    fpir_bound: float | None = None
 
-    t_strong = threshold_at_rate(nonmated, fpir_target)
+    if resolvable:
+        route = ROUTE_MEASURED_FPIR
+        t_strong = nonmated_bound
+    else:
+        per_comparison_target = fmr_for_fpir(fpir_target, comparisons)
+        enough_pairs = (
+            per_comparison_target > 0.0
+            and impostor_scores.size >= 1.0 / per_comparison_target
+        )
+        notes.append(
+            f"{nonmated.size} non-mated probes cannot resolve FPIR={fpir_target:g} "
+            f"(needs about {int(np.ceil(1.0 / fpir_target))}), so the measured FPIR "
+            f"below is a resolution floor and not a rate at that target"
+        )
+        if enough_pairs:
+            route = ROUTE_IMPOSTOR_TAIL_BOUND
+            t_strong, fmr_at_t_strong, fpir_bound = threshold_for_fpir_bound(
+                impostor_scores, fpir_target=fpir_target, comparisons=comparisons
+            )
+            notes.append(
+                f"t_strong derived from the impostor-pair tail: FMR "
+                f"{fmr_at_t_strong:.2e} over {impostor_scores.size} pairs at "
+                f"{t_strong:.4f} implies per-probe FPIR {fpir_bound:.2e} over "
+                f"{comparisons} template comparisons (target {fpir_target:g})"
+            )
+            if t_strong < nonmated_bound:
+                notes.append(
+                    f"t_strong raised from the impostor-derived {t_strong:.4f} to "
+                    f"{nonmated_bound:.4f}: an observed non-mated probe scored above "
+                    f"the derived threshold, and observed beats derived"
+                )
+                t_strong = nonmated_bound
+                fmr_at_t_strong = fmr_at_threshold(impostor_scores, t_strong)
+                fpir_bound = fpir_from_fmr(fmr_at_t_strong, comparisons)
+        else:
+            route = ROUTE_UNRESOLVED_BOUND
+            t_strong = nonmated_bound
+            notes.append(
+                f"no population can resolve FPIR={fpir_target:g}: "
+                f"{impostor_scores.size} impostor pairs cannot measure the "
+                f"per-comparison FMR {per_comparison_target:.2e} it implies over "
+                f"{comparisons} comparisons either. t_strong is a bound above the "
+                f"worst observed non-mated probe and the target is NOT demonstrated"
+            )
+            if impostor_scores.size:
+                fmr_at_t_strong = fmr_at_threshold(impostor_scores, t_strong)
+                fpir_bound = fpir_from_fmr(fmr_at_t_strong, comparisons)
+
     t_possible, recall = threshold_for_review_recall(
         mated, correct, review_recall_target
     )
+    if t_possible >= t_strong:
+        t_possible, recall = threshold_for_review_recall(
+            mated, correct, review_recall_target, ceiling=t_strong
+        )
+        notes.append(
+            f"the recall-driven t_possible sat at or above t_strong {t_strong:.4f}; "
+            f"the FPIR target wins on t_strong and t_possible drops to "
+            f"{t_possible:.4f} beneath it, keeping the review band open"
+        )
     if recall < review_recall_target:
         notes.append(
-            f"review recall target {review_recall_target:.4f} unreachable: only "
-            f"{recall:.4f} of mated probes are correct at rank 1 at any threshold"
+            f"review recall target {review_recall_target:.4f} not met at t_possible "
+            f"{t_possible:.4f}: achieved {recall:.4f}"
         )
-    if t_possible > t_strong:
-        notes.append(
-            f"t_possible clamped from {t_possible:.4f} to t_strong {t_strong:.4f}: "
-            f"the FPIR target binds before the review recall target"
+    if not t_possible < t_strong:  # pragma: no cover - guarded by the branch above
+        raise RuntimeError(
+            f"degenerate band: t_possible {t_possible} is not below t_strong {t_strong}"
         )
-        t_possible = t_strong
 
     margin, margin_notes = choose_margin(
         genuine_gaps if genuine_gaps is not None else np.empty(0),
@@ -485,6 +665,12 @@ def choose_thresholds(
         gallery_size=gallery_size,
         mated_probes=int(mated.size),
         nonmated_probes=int(nonmated.size),
+        t_strong_route=route,
+        fpir_resolvable=resolvable,
+        comparisons_per_probe=comparisons,
+        impostor_pairs=int(impostor_scores.size),
+        fmr_at_t_strong=fmr_at_t_strong,
+        fpir_bound_at_t_strong=fpir_bound,
         notes=tuple(notes),
     )
 

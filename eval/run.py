@@ -123,6 +123,14 @@ def evaluate_samples(samples: list[Sample], settings: Settings) -> dict[str, Any
         fpir_target=settings.fpir_target,
         genuine_gaps=genuine_gaps,
         impostor_gaps=impostor_gaps,
+        # A fixture set never has the ~1/target non-mated probes a 1e-3 FPIR needs, so
+        # the policy falls back to the impostor-pair tail. Both populations are handed
+        # over and the report records which route bound t_strong.
+        impostor=impostor,
+        # This gallery holds exactly one template per enrolled identity, so a probe
+        # makes one comparison per person. The live gallery holds several per person;
+        # the gate's gallery-size rule is what covers that drift (spec 10).
+        comparisons_per_probe=len(enrolled_labels),
     )
     curve = metrics.fpir_fnir_curve(
         mated_scores,
