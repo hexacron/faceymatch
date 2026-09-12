@@ -3,7 +3,10 @@
     "composite": true,
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.tsbuildinfo",
     "target": "ES2022",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    // ES2024.Promise only for `Promise.withResolvers`, which the local Chrome
+    // (and every browser this console runs in) has shipped; the emit target
+    // stays ES2022.
+    "lib": ["ES2022", "ES2024.Promise", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "moduleDetection": "force",

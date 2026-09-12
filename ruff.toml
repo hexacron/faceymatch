@@ -1,0 +1,21 @@
+# Single ruff configuration for the whole repo.
+#
+# `backend/`, `eval/` and `tools/` are one Python project split across three directories.
+# Keeping the config here — and out of `backend/pyproject.toml` — means every file resolves
+# the same rule set and the same first-party import roots whether ruff runs from the repo
+# root or from `backend/`, so import ordering has one answer instead of two.
+
+line-length = 100
+target-version = "py312"
+src = ["backend", "eval", "tools"]
+extend-exclude = ["frontend"]
+
+[lint]
+select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "SIM", "RUF", "ANN", "S"]
+ignore = ["ANN401"]
+
+[lint.isort]
+known-first-party = ["app", "metrics"]
+
+[lint.per-file-ignores]
+"**/tests/*" = ["S101"]
