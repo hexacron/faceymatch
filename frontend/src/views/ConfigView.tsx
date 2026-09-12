@@ -170,11 +170,17 @@ function ConfigEditor({ config, onReload }: { config: Config; onReload: () => vo
   const embedderChange = diff.changes.embedder_model !== undefined;
   const detectorChange = diff.changes.detector_model !== undefined;
   const modelChange = embedderChange || detectorChange;
+  // Enabling the gate needs a reason and a confirm step; turning it off does
+  // not, because the strict state never needs justifying.
+  const licenceEnable = diff.changes.allow_noncommercial_models === true;
+  const licenceDisable = diff.changes.allow_noncommercial_models === false;
   const reasonText = reason.trim();
-  const reasonMissing = modelChange && reasonText === "";
+  const reasonMissing = (modelChange || licenceEnable) && reasonText === "";
   const modelsLocked = queue.length > 0 || pending !== null;
-  const showConfirm = confirming && embedderChange;
+  const needsConfirm = embedderChange || licenceEnable;
+  const showConfirm = confirming && needsConfirm;
   const head = queue[0] ?? null;
+  const activeBlocked = config.models.filter((model) => model.active && !model.selectable);
 
   const setField = (key: keyof Draft, value: string): void => {
     setDraft((current) => ({ ...current, [key]: value }));
@@ -205,9 +211,9 @@ function ConfigEditor({ config, onReload }: { config: Config; onReload: () => vo
     if (invalid || diff.list.length === 0 || reasonMissing) {
       return;
     }
-    // Two-step for the embedder: the first submit opens the consequences, the
+    // Two-step for the consequential changes: the first submit opens them, the
     // second one sends them.
-    if (embedderChange && !confirming) {
+    if (needsConfirm && !confirming) {
       setConfirming(true);
       return;
     }
@@ -232,7 +238,18 @@ function ConfigEditor({ config, onReload }: { config: Config; onReload: () => vo
       onReload();
     } catch (failure) {
       setConfirming(false);
-      if (failure instanceof ApiError && failure.status === 409) {
+      if (failure instanceof ApiError && failure.status === 409 && licenceDisable) {
+        // The other 409: a non-commercial model is active, so the gate cannot
+        // close under it. The backend's detail names the model, its license
+        // and the remedy, so it is quoted rather than paraphrased.
+        // The detail is a bare clause with no terminator of its own, and it
+        // runs straight into the next sentence without one.
+        const quoted = failure.detail.endsWith(".") ? failure.detail : `${failure.detail}.`;
+        setNotice({
+          tone: "attention",
+          text: `The backend refused to block non-commercial models and nothing was written: ${quoted} You can do both in one submission \u2014 pick a commercially licensed embedder above and untick the gate together.`,
+        });
+      } else if (failure instanceof ApiError && failure.status === 409) {
         // Not a failure of this request: a re-embed the operator may not have
         // seen is still running, and the backend is protecting the gallery.
         setNotice({
@@ -278,11 +295,13 @@ function ConfigEditor({ config, onReload }: { config: Config; onReload: () => vo
 
   const submitLabel = busy
     ? "Applying\u2026"
-    : embedderChange && !confirming
-      ? "Review embedder change\u2026"
+    : needsConfirm && !confirming
+      ? "Review these changes\u2026"
       : embedderChange
         ? "Change embedder and re-embed the gallery"
-        : "Apply changes";
+        : licenceEnable
+          ? "Allow non-commercial models"
+          : "Apply changes";
 
   return (
     <>
@@ -325,12 +344,30 @@ function ConfigEditor({ config, onReload }: { config: Config; onReload: () => vo
             leave templates written under two models.
           </p>
         )}
+        {activeBlocked.map((model) => (
+          // A model can be running and unacceptable at once: closing the
+          // license gate under it is refused, but a digest that stopped
+          // matching models.lock is not. Either way the row below reads
+          // "blocked" while wearing the active badge, which needs explaining
+          // where it happens.
+          <p className="notice error" key={model.id}>
+            <strong>The running {model.kind} is not selectable under the current settings.</strong>{" "}
+            {model.blocked_reason ?? "The backend would refuse it."} It keeps running until it is
+            replaced, and the auto-accept gate stays closed while that is true.
+          </p>
+        ))}
+        <LicenceGate
+          on={draft.allow_noncommercial_models === "true"}
+          stored={config.editable.allow_noncommercial_models}
+          onToggle={(next) => setField("allow_noncommercial_models", next ? "true" : "false")}
+        />
         <ModelPicker
           kind="detector"
           legend="Detector model"
           note="Changing the detector enqueues nothing and does not re-run detection on media that is already stored: existing detections, crops and templates stay exactly as they are. Only media processed after the change uses the new detector, so the library will hold boxes from both until you re-process."
           models={config.models}
-          allowNoncommercial={config.readonly.allow_noncommercial_models}
+          draftAllow={draft.allow_noncommercial_models === "true"}
+          storedAllow={config.editable.allow_noncommercial_models}
           value={draft.detector_model}
           locked={modelsLocked}
           onPick={(id) => setField("detector_model", id)}
@@ -340,7 +377,8 @@ function ConfigEditor({ config, onReload }: { config: Config; onReload: () => vo
           legend="Embedder model"
           note="Changing the embedder invalidates every stored vector: the backend enqueues a re-embed of all templates and tracks, then a re-match, and nothing can be matched until both finish. You will be asked to confirm the consequences before this is sent."
           models={config.models}
-          allowNoncommercial={config.readonly.allow_noncommercial_models}
+          draftAllow={draft.allow_noncommercial_models === "true"}
+          storedAllow={config.editable.allow_noncommercial_models}
           value={draft.embedder_model}
           locked={modelsLocked}
           onPick={(id) => setField("embedder_model", id)}
@@ -427,7 +465,13 @@ function ConfigEditor({ config, onReload }: { config: Config; onReload: () => vo
           <label className="field" htmlFor={reasonId}>
             Reason{" "}
             <span className="muted">
-              {modelChange ? "(required for a model change)" : "(optional)"}
+              {modelChange && licenceEnable
+                ? "(required: model change and license gate)"
+                : modelChange
+                  ? "(required for a model change)"
+                  : licenceEnable
+                    ? "(required to allow non-commercial models)"
+                    : "(optional)"}
             </span>
           </label>
           <textarea
@@ -435,26 +479,33 @@ function ConfigEditor({ config, onReload }: { config: Config; onReload: () => vo
             rows={2}
             maxLength={2000}
             value={reason}
-            required={modelChange}
+            required={modelChange || licenceEnable}
             aria-describedby={summaryId}
             placeholder={
-              modelChange
-                ? "Why this model is being changed \u2014 this is what the audit log records"
-                : "Optional note recorded with this change"
+              licenceEnable
+                ? "Why this install may run a non-commercially licensed model \u2014 this is what the audit log records"
+                : modelChange
+                  ? "Why this model is being changed \u2014 this is what the audit log records"
+                  : "Optional note recorded with this change"
             }
             onChange={(event) => setReason(event.currentTarget.value)}
           />
           {reasonMissing && (
-            <p className="field-error">A model change is only accepted with a stated reason.</p>
+            <p className="field-error">
+              {licenceEnable && !modelChange
+                ? "The backend only opens the license gate with a stated reason."
+                : "A model change is only accepted with a stated reason."}
+            </p>
           )}
 
-          {showConfirm && (
+          {showConfirm && embedderChange && (
             <EmbedderConfirm
               from={config.editable.embedder_model}
               to={draft.embedder_model}
               detectorChange={detectorChange}
             />
           )}
+          {showConfirm && licenceEnable && <LicenceConfirm />}
 
           <div className="config-actions">
             <button
@@ -556,18 +607,45 @@ function JobWatch({
   );
 }
 
-/** Whether this model can be picked here, and if not, the reason in words. */
-function pickability(model: ConfigModel, allowNoncommercial: boolean): string | null {
-  if (model.active) {
-    return null;
+/**
+ * What the picker says about one model: whether it can be chosen in this
+ * submission, and the sentence under it.
+ *
+ * `selectable` is the backend's own answer, computed by the check the PATCH
+ * enforces against the *stored* license gate, so it is authoritative for
+ * everything except a gate this draft is about to open. The license is checked
+ * last, so a reason that names the gate is one this submission can lift and
+ * any other reason is integrity — a missing weight file, a digest that does
+ * not match models.lock — which no setting will fix. Being active is no
+ * exemption: a non-commercial model left running under a closed gate reports
+ * itself unselectable, and says so here.
+ */
+type Pickability =
+  | { state: "open"; note: string }
+  | { state: "unlocked"; note: string }
+  | { state: "blocked"; note: string };
+
+function pickability(model: ConfigModel, draftAllow: boolean, storedAllow: boolean): Pickability {
+  if (model.selectable) {
+    return {
+      state: "open",
+      note: model.commercial_use
+        ? "Commercial use permitted by its license."
+        : "Non-commercial license: loadable because the license gate is open, and every export has to state it (C7).",
+    };
   }
-  if (!model.present) {
-    return "Weights are not provisioned, so the backend cannot load this model. Fetch them with tools/fetch_models.py.";
+  const reason = model.blocked_reason ?? "The backend will not accept this model.";
+  // Only the license reason can be lifted here, and only by this submission
+  // opening the gate. Anything else stays blocked, so the picker can never
+  // offer something the PATCH would refuse.
+  const licenceOnly = !model.commercial_use && !storedAllow && reason.includes("allow_noncommercial_models");
+  if (licenceOnly && draftAllow) {
+    return {
+      state: "unlocked",
+      note: "Non-commercial license. Blocked right now, and selectable because this submission opens the license gate above. Every export has to state the license (C7).",
+    };
   }
-  if (!model.commercial_use && !allowNoncommercial) {
-    return "Non-commercial license, and ALLOW_NONCOMMERCIAL_MODELS is false, so the backend refuses to load it (invariant 9). That flag is set in .env and does need a restart.";
-  }
-  return null;
+  return { state: "blocked", note: reason };
 }
 
 function ModelPicker({
@@ -575,7 +653,8 @@ function ModelPicker({
   legend,
   note,
   models,
-  allowNoncommercial,
+  draftAllow,
+  storedAllow,
   value,
   locked,
   onPick,
@@ -584,7 +663,8 @@ function ModelPicker({
   legend: string;
   note: string;
   models: ConfigModel[];
-  allowNoncommercial: boolean;
+  draftAllow: boolean;
+  storedAllow: boolean;
   value: string;
   locked: boolean;
   onPick: (id: string) => void;
@@ -603,20 +683,21 @@ function ModelPicker({
       ) : (
         <div className="model-choices">
           {options.map((model, index) => {
-            const blocked = pickability(model, allowNoncommercial);
+            const pick = pickability(model, draftAllow, storedAllow);
+            const blocked = pick.state === "blocked";
             const describedBy = `${groupId}-${String(index)}-desc`;
             const checked = value === model.id;
             return (
               <label
                 key={model.id}
-                className={`model-choice${checked ? " checked" : ""}${blocked === null ? "" : " blocked"}`}
+                className={`model-choice${checked ? " checked" : ""}${blocked ? " blocked" : ""}`}
               >
                 <input
                   type="radio"
                   name={`${groupId}-${kind}`}
                   value={model.id}
                   checked={checked}
-                  disabled={locked || blocked !== null}
+                  disabled={locked || blocked}
                   aria-describedby={describedBy}
                   onChange={() => onPick(model.id)}
                 />
@@ -633,12 +714,12 @@ function ModelPicker({
                     {!model.present && (
                       <span className="status-chip chip-attention">no weights</span>
                     )}
+                    {pick.state === "unlocked" && (
+                      <span className="status-chip chip-attention">needs the gate open</span>
+                    )}
                   </span>
                   <span className="field-help" id={describedBy}>
-                    {blocked ??
-                      (model.commercial_use
-                        ? "Commercial use permitted by its license."
-                        : "Non-commercial license: selectable only because ALLOW_NONCOMMERCIAL_MODELS is true, and every export has to state it (C7).")}
+                    {pick.note}
                   </span>
                 </span>
               </label>
@@ -731,6 +812,83 @@ function ScoreModeField({
   );
 }
 
+/**
+ * Invariant 9's gate, as a control rather than an environment fact.
+ *
+ * What it changes is narrow and the copy has to keep it narrow: it stops the
+ * backend refusing to *load* a model whose license forbids commercial use. It
+ * does not alter that license, and the license stays printed on every model
+ * row and in every export (C7). The audit entry the flip writes is now the
+ * only record of why this install may run such a model, which is why the
+ * reason is required for opening it and not for closing it.
+ */
+function LicenceGate({
+  on,
+  stored,
+  onToggle,
+}: {
+  on: boolean;
+  stored: boolean;
+  onToggle: (next: boolean) => void;
+}) {
+  const helpId = useId();
+
+  return (
+    <fieldset className="config-group">
+      <legend>Model licensing</legend>
+      <label className="checkbox-label">
+        <input
+          type="checkbox"
+          checked={on}
+          aria-describedby={helpId}
+          onChange={(event) => onToggle(event.currentTarget.checked)}
+        />
+        <span className="checkbox-text">
+          Allow models whose license forbids commercial use
+        </span>
+      </label>
+      <p className="field-help" id={helpId}>
+        This decides only whether the backend will load such a model (invariant 9). It does not
+        change any license: what a model is licensed under is printed on its row above and has to
+        be stated on every export either way (C7). Opening the gate is audited with your reason;
+        closing it again is not, and is refused while a non-commercially licensed model is still
+        active {"\u2014"} pick a commercially licensed embedder in the same submission to do both at
+        once.
+      </p>
+      {on && !stored && (
+        <p className="field-help">
+          Blocked models above become selectable in this submission only, until it is sent.
+        </p>
+      )}
+    </fieldset>
+  );
+}
+
+/** What opening the license gate does, and what it does not do. */
+function LicenceConfirm() {
+  return (
+    <div className="notice error confirm-panel" role="alert">
+      <strong>Allowing non-commercially licensed models is recorded against you.</strong>
+      <ul>
+        <li>
+          The backend will load a model whose license forbids commercial use. That is a decision
+          about this install, not about the model: the license is unchanged, stays printed on the
+          model, and still has to be stated on every export made with it (C7).
+        </li>
+        <li>
+          The reason above goes into the append-only audit log with this change. It is the only
+          record of why this install may run such a model, so write it for someone reading the case
+          later, not for yourself now.
+        </li>
+        <li>
+          Nothing loads differently until a model that needed the gate is actually selected.
+          Opening it on its own changes no vector and enqueues no job.
+        </li>
+      </ul>
+    </div>
+  );
+}
+
 /** The consequences of an embedder switch, in the order they will happen. */
 function EmbedderConfirm({
   from,
@@ -801,13 +959,6 @@ function ReadonlyFacts({ config }: { config: Config }) {
 
         <dt>Execution provider</dt>
         <dd className="mono">{fixed.execution_provider}</dd>
-
-        <dt>Non-commercial models</dt>
-        <dd className={fixed.allow_noncommercial_models ? "status-bad" : ""}>
-          {fixed.allow_noncommercial_models
-            ? "allowed \u2014 exports must state the active model license (C7)"
-            : "blocked \u2014 non-commercial models cannot be selected above"}
-        </dd>
 
         <dt>Database</dt>
         <dd className="mono">{fixed.db_path}</dd>

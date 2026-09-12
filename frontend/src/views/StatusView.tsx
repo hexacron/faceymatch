@@ -119,7 +119,7 @@ function HealthPanel({ health, onReload }: { health: Health; onReload: () => voi
         <dd className={health.allow_noncommercial_models ? "status-bad" : ""}>
           {health.allow_noncommercial_models
             ? "ALLOWED \u2014 exports must state the active model license (C7)"
-            : "blocked"}
+            : "blocked right now"}
         </dd>
 
         <dt>Threshold set</dt>
