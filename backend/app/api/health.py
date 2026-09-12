@@ -1,11 +1,19 @@
-"""Health and model-license surface.
+"""Health, model licence, and whether anything may confirm an identity by itself.
 
-C7 requires the active model license to be visible in the UI, so it is reported here even
+C7 requires the active model licence to be visible in the UI, so it is reported here even
 when the weights are not provisioned yet (license: null).
+
+`auto_accept` is reported for the same reason. Auto-accept being off is the normal state of
+an uncalibrated or freshly-switched install (C5, invariant 4, spec 10), and an operator who
+cannot see that reads an empty identity column as "no matches" rather than as "nothing is
+allowed to self-confirm yet". The gate is built with the same `acceptance.build_gate` and
+the same active threshold set the job worker uses, so this endpoint cannot disagree with
+what actually happens on the next match.
 """
 
 from __future__ import annotations
 
+import sqlite3
 from typing import Literal
 
 from fastapi import APIRouter
@@ -13,9 +21,14 @@ from pydantic import BaseModel
 
 from app import audit
 from app.api.deps import ConnDep, LockDep, SettingsDep
+from app.config import Settings
+from app.core import registry
+from app.core.acceptance import build_gate
 from app.db.migrate import current_version
+from app.models_lock import ModelsLock
 from app.models_lock import status as model_status
 from app.pipeline.capture import capability as capture_capability
+from app.pipeline.matching import active_threshold_set, gallery_person_count
 
 router = APIRouter(prefix="/api", tags=["health"])
 
@@ -49,6 +62,21 @@ class CaptureCapabilityOut(BaseModel):
     reason: str | None
 
 
+class AutoAcceptOut(BaseModel):
+    """Why the system will or will not confirm an identity without an operator (spec 6.5).
+
+    `reason` is non-null exactly when `allowed` is false. `warning` is independent: the gate
+    is open, but the live gallery has grown past twice the size the active set was
+    calibrated at, so the false-positive rate is above the calibrated target (spec 10).
+    """
+
+    allowed: bool
+    reason: str | None
+    warning: str | None
+    embedder_model_id: str
+    execution_provider: str
+
+
 class HealthOut(BaseModel):
     status: Literal["ok"]
     version: str
@@ -59,6 +87,7 @@ class HealthOut(BaseModel):
     execution_provider: str
     allow_noncommercial_models: bool
     threshold_set: ThresholdSetOut | None
+    auto_accept: AutoAcceptOut
     capture: CaptureCapabilityOut
     audit_head_seq: int
     audit_head_hash: str | None
@@ -85,6 +114,7 @@ def healthz(conn: ConnDep, settings: SettingsDep, lock: LockDep) -> HealthOut:
         )
     )
     capture = capture_capability()
+    auto_accept = _auto_accept(conn, settings, lock)
 
     return HealthOut(
         status="ok",
@@ -105,6 +135,7 @@ def healthz(conn: ConnDep, settings: SettingsDep, lock: LockDep) -> HealthOut:
         execution_provider=settings.execution_provider,
         allow_noncommercial_models=settings.allow_noncommercial_models,
         threshold_set=threshold_set,
+        auto_accept=auto_accept,
         capture=CaptureCapabilityOut(
             available=capture.available,
             platform_supported=capture.platform_supported,
@@ -113,4 +144,53 @@ def healthz(conn: ConnDep, settings: SettingsDep, lock: LockDep) -> HealthOut:
         ),
         audit_head_seq=head_seq,
         audit_head_hash=None if head_seq == 0 else head_hash,
+    )
+
+
+def _auto_accept(
+    conn: sqlite3.Connection, settings: Settings, lock: ModelsLock
+) -> AutoAcceptOut:
+    """Build the real gate, from the real execution provider where that is knowable.
+
+    The provider a session runs on is not always the one that was requested: a CoreML
+    request on a build without CoreML falls back to CPU, and a threshold set calibrated on
+    CoreML does not apply to CPU scores (spec 10). `registry.get_active_models` is cached,
+    so this costs one dictionary lookup after the first call.
+
+    Any failure to build the models — absent, unlicensed, corrupt or unparseable weights —
+    is reported as a closed gate rather than raised. Health is what an operator reads when
+    something is already wrong, so it has to answer while the install is broken; and a model
+    that will not load is a model that will auto-accept nothing.
+    """
+    threshold_set = active_threshold_set(conn)
+    try:
+        models = registry.get_active_models(settings, lock)
+    except Exception as exc:  # see the docstring: health must still answer when models fail
+        return AutoAcceptOut(
+            allowed=False,
+            reason=str(exc),
+            warning=None,
+            embedder_model_id=settings.embedder_model,
+            execution_provider=settings.execution_provider,
+        )
+    if threshold_set is None:
+        return AutoAcceptOut(
+            allowed=False,
+            reason="no active threshold set",
+            warning=None,
+            embedder_model_id=models.embedder_model_id,
+            execution_provider=models.execution_provider,
+        )
+    gate = build_gate(
+        threshold_set,
+        embedder_model_id=models.embedder_model_id,
+        execution_provider=models.execution_provider,
+        live_gallery_size=gallery_person_count(conn, embedder_model_id=models.embedder_model_id),
+    )
+    return AutoAcceptOut(
+        allowed=gate.allowed,
+        reason=gate.reason,
+        warning=gate.warning,
+        embedder_model_id=models.embedder_model_id,
+        execution_provider=models.execution_provider,
     )

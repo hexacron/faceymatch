@@ -21,6 +21,7 @@ from app import audit, models_lock, runtime_config
 from app.api import audit as audit_router
 from app.api import capture as capture_router
 from app.api import cases as cases_router
+from app.api import config as config_router
 from app.api import health as health_router
 from app.api import identifications as identifications_router
 from app.api import jobs as jobs_router
@@ -157,6 +158,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(review_router.router)
     app.include_router(thresholds_router.router)
     app.include_router(models_router.router)
+    app.include_router(config_router.router)
 
     # Mounted last so /api never collides with a built asset path.
     if resolved.frontend_dist.is_dir():
