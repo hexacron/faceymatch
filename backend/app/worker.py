@@ -1,7 +1,7 @@
 """Single job worker process (D10).
 
-Handlers registered: `audit_verify`, `process`, `rematch`. An unregistered kind fails its
-job loudly rather than silently succeeding.
+Handlers registered: `audit_verify`, `process`, `rematch`, `reembed`. An unregistered kind
+fails its job loudly rather than silently succeeding.
 
 Every job runs against the *effective* settings — the environment overlaid with the
 durable overrides in `runtime_config` — read fresh from the database as the job is claimed.
@@ -28,6 +28,7 @@ from app.db.migrate import migrate
 from app.jobs import Job, claim_next, finish
 from app.pipeline.matching import rematch
 from app.pipeline.process import mark_failed, process_image
+from app.pipeline.reembed import reembed
 
 log = logging.getLogger("app.worker")
 
@@ -93,10 +94,35 @@ def handle_rematch(
     ).as_progress()
 
 
+def handle_reembed(
+    conn: sqlite3.Connection, job: Job, settings: Settings
+) -> dict[str, Any]:
+    """Re-embed stored crops, track means and templates under the active embedder.
+
+    The target model is pinned in the job's params at enqueue time. If the configuration
+    has moved since, the job fails rather than re-embedding into a model nobody asked for:
+    a half-finished switch that silently retargets is how two models end up mixed in one
+    gallery (invariant 2).
+    """
+    lock = models_lock.verify(settings.models_dir)
+    active = get_active_models(settings, lock)
+    target = job.params.get("embedder_model_id")
+    if isinstance(target, str) and target != active.embedder_model_id:
+        raise ValueError(
+            f"reembed job targets {target!r} but the active embedder is now "
+            f"{active.embedder_model_id!r}; re-enqueue the job for the active model"
+        )
+    return reembed(
+        conn, settings, active, job_id=job.id, actor=settings.operator_name
+    ).as_progress()
+
+
+
 HANDLERS: dict[str, Handler] = {
     "audit_verify": handle_audit_verify,
     "process": handle_process,
     "rematch": handle_rematch,
+    "reembed": handle_reembed,
 }
 
 

@@ -138,7 +138,17 @@ def process_image(
     now = audit.now_ts()
     with transaction(conn):
         for item in prepared:
-            mean_blob = None if item.embedding is None else vectors.to_blob(item.embedding)
+            # One crop per still-image track, but through the same definition of a track
+            # mean the re-embed job uses, so the two writers cannot drift (spec 6.2 step 6).
+            mean_blob = (
+                None
+                if item.embedding is None
+                else vectors.to_blob(
+                    vectors.track_mean(
+                        item.embedding[None, :], [item.det_score], k=settings.embed_k
+                    )
+                )
+            )
             conn.execute(
                 "INSERT INTO tracks (id, media_id, start_ms, end_ms, best_detection_id, "
                 "embedding_mean, embedder_model_id) VALUES (?, ?, 0, 0, NULL, ?, ?)",

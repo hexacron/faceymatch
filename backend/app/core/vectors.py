@@ -8,6 +8,8 @@ against the expected dim rather than guessing.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 
 DTYPE = np.dtype("<f4")
@@ -45,3 +47,33 @@ def stack_blobs(blobs: list[bytes], dim: int) -> np.ndarray:
     for i, blob in enumerate(blobs):
         matrix[i] = from_blob(blob, dim)
     return matrix
+
+
+def track_mean(embeddings: np.ndarray, scores: Sequence[float], *, k: int) -> np.ndarray:
+    """L2-normalized mean of the best `k` crop embeddings of one track (spec 6.2 step 6).
+
+    "Best" is by detector score, descending: it is the per-detection quality signal the
+    pipeline already records (`detections.det_score`, and `templates.quality` derived from
+    it), so the crops that define a track are the ones the detector was most sure of.
+
+    One function for both writers. The still-image pipeline gives it a single crop and the
+    re-embed job gives it every stored crop of a track; a second implementation would be a
+    second definition of what a track's vector means, and the two models' means would stop
+    being comparable quantities.
+    """
+    if k < 1:
+        raise ValueError(f"k must be at least 1, got {k}")
+    matrix = np.asarray(embeddings, dtype=np.float32)
+    if matrix.ndim != 2:
+        raise ValueError(f"embeddings must be (N, dim), got shape {matrix.shape}")
+    if matrix.shape[0] == 0:
+        raise ValueError("a track mean needs at least one crop embedding")
+    if len(scores) != matrix.shape[0]:
+        raise ValueError(
+            f"got {len(scores)} scores for {matrix.shape[0]} embeddings"
+        )
+    if matrix.shape[0] > k:
+        # Stable: equal scores keep insertion order, so the mean is reproducible.
+        order = np.argsort(-np.asarray(scores, dtype=np.float32), kind="stable")[:k]
+        matrix = matrix[order]
+    return l2_normalize(matrix.mean(axis=0))

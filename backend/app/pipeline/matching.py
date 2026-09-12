@@ -279,3 +279,21 @@ def active_threshold_set(conn: sqlite3.Connection) -> acceptance.ThresholdSet | 
             None if row["execution_provider"] is None else str(row["execution_provider"])
         ),
     )
+
+
+def gallery_person_count(conn: sqlite3.Connection, *, embedder_model_id: str) -> int:
+    """How many persons are actually in the gallery for one embedder.
+
+    The same filter `rematch` and `live.gallery_for` load their matrices with: an active
+    template, an enrolled person, not `do_not_enroll`, and this model only (invariant 2).
+    Public because spec 10's 2x warn and 5x block rule compares it against the calibrated
+    gallery size, and a second definition of "in the gallery" would move that line.
+    """
+    row = conn.execute(
+        "SELECT COUNT(DISTINCT t.person_id) AS count FROM templates t "
+        "JOIN persons p ON p.id = t.person_id "
+        "WHERE t.status = 'active' AND p.status = 'enrolled' AND p.do_not_enroll = 0 "
+        "AND t.embedder_model_id = ?",
+        (embedder_model_id,),
+    ).fetchone()
+    return 0 if row is None else int(row["count"])

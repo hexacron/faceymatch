@@ -50,6 +50,8 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
 uv run python -m app.worker      # job worker, separate process
 uv run python -m app.cli check   # startup checks: schema, models.lock
 uv run python -m app.cli verify-audit
+uv run python -m app.cli enqueue-reembed   # re-embed stored crops under the active embedder
+                                           # (spec 6.3). PATCH /api/config queues it too.
 
 # minimal calibration (spec 10): writes the report and an inactive calibrated threshold_set.
 # Activate it with POST /api/threshold_sets/{id}/activate; nothing auto-accepts before that.

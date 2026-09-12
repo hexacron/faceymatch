@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 
-from app import audit
+from app import audit, runtime_config
 from app.config import get_settings
 from app.db.conn import connect
 from app.db.migrate import current_version, migrate
@@ -69,6 +69,27 @@ def _cmd_enqueue_audit_verify() -> int:
     return 0
 
 
+def _cmd_enqueue_reembed() -> int:
+    """Spec 6.3: a model switch re-embeds templates and tracks, and that is a CLI job too."""
+    settings = get_settings()
+    conn = connect(settings.db_path)
+    try:
+        effective = runtime_config.effective(conn, settings)
+        job = enqueue(
+            conn,
+            kind="reembed",
+            actor=effective.operator_name,
+            params={
+                "embedder_model_id": effective.embedder_model,
+                "reason": "cli_request",
+            },
+        )
+    finally:
+        conn.close()
+    print(job.id)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="app.cli")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -76,6 +97,10 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("check", help="run startup checks (schema, models.lock)")
     sub.add_parser("verify-audit", help="recompute the audit hash chain now")
     sub.add_parser("enqueue-audit-verify", help="queue chain verification for the worker")
+    sub.add_parser(
+        "enqueue-reembed",
+        help="queue a re-embed of stored crops, track means and templates (spec 6.3)",
+    )
 
     args = parser.parse_args(argv)
     match args.command:
@@ -87,6 +112,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_verify_audit()
         case "enqueue-audit-verify":
             return _cmd_enqueue_audit_verify()
+        case "enqueue-reembed":
+            return _cmd_enqueue_reembed()
         case _:  # pragma: no cover - argparse rejects unknown commands
             parser.error(f"unknown command {args.command!r}")
 

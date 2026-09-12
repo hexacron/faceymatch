@@ -47,6 +47,29 @@ def enqueue_rematch(conn: ConnDep, settings: SettingsDep) -> JobOut:
     return JobOut(**asdict(job))
 
 
+@router.post("/reembed", response_model=JobOut, status_code=status.HTTP_202_ACCEPTED)
+def enqueue_reembed(conn: ConnDep, settings: SettingsDep) -> JobOut:
+    """Queue a re-embed of every stored crop, track mean and template under the active embedder.
+
+    `PATCH /api/config` already enqueues this when the embedder changes. This endpoint is
+    for re-running a switch that did not finish — a killed worker, a crop store that was
+    still being restored — without pretending to change a setting that is already set. Every
+    write is guarded on the row it would create, so it skips what a previous run already
+    committed instead of duplicating it, and it never re-decodes original media
+    (spec 6.2 step 6, 6.3).
+    """
+    job = enqueue(
+        conn,
+        kind="reembed",
+        actor=settings.operator_name,
+        params={
+            "embedder_model_id": settings.embedder_model,
+            "reason": "operator_request",
+        },
+    )
+    return JobOut(**asdict(job))
+
+
 @router.get("/{job_id}", response_model=JobOut)
 def get_job(job_id: str, conn: ConnDep) -> JobOut:
     job = get(conn, job_id)
