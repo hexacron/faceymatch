@@ -1,23 +1,32 @@
-"""One test per invariant that M0 can actually enforce (AGENTS.md test rules).
+"""One test per invariant this build can enforce (AGENTS.md test rules).
 
-Invariants 3, 7, 10 depend on the ingest and enrollment code paths and are tested with the
-milestones that add them.
+Invariant 10 has no runtime hook of its own: no attribute model is listed in models.lock,
+and `test_unlisted_weights_refuse_to_start` is what stops one being loaded.
 """
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import socket
 import sqlite3
 from pathlib import Path
+from typing import Any
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 from pydantic import ValidationError
 
 from app import audit, models_lock
 from app.config import REPO_ROOT, Settings
+from app.core import storage, vectors
 from app.db.conn import transaction
+from app.enrollment import create_template_from_detection
+from app.pipeline.ingest import ingest_file
+from app.pipeline.matching import rematch
 from tests.conftest import insert_match, seed_gallery
 
 
@@ -110,6 +119,310 @@ def test_rematch_cannot_overwrite_an_operator_identity(conn: sqlite3.Connection)
             "UPDATE identities SET source = 'auto', updated_at = ? WHERE track_id = ?",
             (audit.now_ts(), ids["track"]),
         )
+
+
+def _rematchable(conn: sqlite3.Connection, *, execution_provider: str) -> dict[str, str]:
+    """`seed_gallery` with real 2-d vectors, so `rematch` can actually score it."""
+    ids = seed_gallery(conn, calibrated=True)
+    blob = vectors.to_blob(np.array([1.0, 0.0], dtype=np.float32))
+    with transaction(conn):
+        conn.execute("UPDATE models SET dim = 2 WHERE kind = 'embedder'")
+        conn.execute("UPDATE templates SET embedding = ? WHERE id = ?", (blob, ids["template"]))
+        conn.execute("UPDATE tracks SET embedding_mean = ? WHERE id = ?", (blob, ids["track"]))
+        conn.execute(
+            "UPDATE threshold_sets SET execution_provider = ? WHERE id = ?",
+            (execution_provider, ids["threshold_set"]),
+        )
+    return ids
+
+
+# Spec 10: a threshold set is only reproducible on the execution provider it was
+# calibrated on, so auto-accept requires the runtime provider to match it.
+def test_auto_accept_requires_the_calibrated_execution_provider(
+    conn: sqlite3.Connection, settings: Settings
+) -> None:
+    ids = _rematchable(conn, execution_provider="CoreMLExecutionProvider")
+
+    blocked = rematch(
+        conn,
+        settings,
+        embedder_model_id=ids["embedder"],
+        execution_provider="CPUExecutionProvider",
+        actor="tester",
+    )
+    assert blocked.matches == 1
+    assert blocked.auto_accepted == 0
+    assert blocked.gate_allowed is False
+    assert conn.execute("SELECT COUNT(*) AS n FROM identities").fetchone()["n"] == 0
+
+    # Same scores, same gallery: only the calibrated provider changes.
+    with transaction(conn):
+        conn.execute(
+            "UPDATE threshold_sets SET execution_provider = 'CPUExecutionProvider' WHERE id = ?",
+            (ids["threshold_set"],),
+        )
+    allowed = rematch(
+        conn,
+        settings,
+        embedder_model_id=ids["embedder"],
+        execution_provider="CPUExecutionProvider",
+        actor="tester",
+    )
+    assert allowed.auto_accepted == 1
+    row = conn.execute(
+        "SELECT source FROM identities WHERE track_id = ?", (ids["track"],)
+    ).fetchone()
+    assert row["source"] == "auto"
+
+
+# Invariant 3: only operator actions create templates. Auto-matches never do.
+def test_rematch_never_creates_a_template(
+    conn: sqlite3.Connection, settings: Settings
+) -> None:
+    ids = _rematchable(conn, execution_provider="CPUExecutionProvider")
+    before = conn.execute("SELECT COUNT(*) AS n FROM templates").fetchone()["n"]
+
+    result = rematch(
+        conn,
+        settings,
+        embedder_model_id=ids["embedder"],
+        execution_provider="CPUExecutionProvider",
+        actor="tester",
+    )
+
+    assert result.auto_accepted == 1  # the auto path ran, and still enrolled nothing
+    assert conn.execute("SELECT COUNT(*) AS n FROM templates").fetchone()["n"] == before
+    created_by = {
+        str(row["created_by"])
+        for row in conn.execute("SELECT created_by FROM templates").fetchall()
+    }
+    assert created_by == {"tester"}
+
+
+def test_enrollment_from_a_detection_needs_an_embedding_for_the_active_model(
+    conn: sqlite3.Connection,
+) -> None:
+    """An operator can only enrol what the active embedder actually produced (invariant 2)."""
+    ids = seed_gallery(conn)
+    with pytest.raises(ValueError, match="no quality-passing embedding"), transaction(conn):
+        create_template_from_detection(
+            conn,
+            person_id=ids["person"],
+            detection_id=ids["detection"],
+            embedder_model_id=ids["other_embedder"],
+            actor="tester",
+        )
+
+
+def _enrollable(conn: sqlite3.Connection, settings: Settings) -> dict[str, str]:
+    """`seed_gallery` where the track's best detection has an embedding for the *active*
+    embedder, which is what the enrollment path looks for."""
+    ids = seed_gallery(conn)
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO models (id, name, version, kind, sha256, license, commercial_use, "
+            "dim) VALUES (?, 'SFace', '2021dec', 'embedder', ?, 'Apache-2.0', 1, 2)",
+            (settings.embedder_model, "f" * 64),
+        )
+        conn.execute(
+            "UPDATE tracks SET best_detection_id = ? WHERE id = ?",
+            (ids["detection"], ids["track"]),
+        )
+        conn.execute(
+            "INSERT INTO detection_embeddings (detection_id, embedding, embedder_model_id, "
+            "created_at) VALUES (?, ?, ?, ?)",
+            (
+                ids["detection"],
+                vectors.to_blob(np.array([1.0, 0.0], dtype=np.float32)),
+                settings.embedder_model,
+                audit.now_ts(),
+            ),
+        )
+    return ids
+
+
+def _templates(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("SELECT COUNT(*) AS n FROM templates").fetchone()["n"])
+
+
+def _last_payload(conn: sqlite3.Connection, action: str) -> dict[str, Any]:
+    row = conn.execute(
+        "SELECT payload_json FROM audit_log WHERE action = ? ORDER BY seq DESC LIMIT 1",
+        (action,),
+    ).fetchone()
+    payload: dict[str, Any] = json.loads(str(row["payload_json"]))
+    return payload
+
+
+# D17 / spec 6.6: tagging and enrolling are separate operator actions.
+def test_confirm_does_not_enrol_unless_asked(
+    client: TestClient, conn: sqlite3.Connection, settings: Settings
+) -> None:
+    ids = _enrollable(conn, settings)
+    other = client.post("/api/persons", json={"display_name": "Someone Else"}).json()["id"]
+    before = _templates(conn)
+
+    resp = client.post(
+        "/api/identifications",
+        json={"track_id": ids["track"], "decision": "confirm", "person_id": other},
+    )
+
+    assert resp.status_code == 201
+    assert _templates(conn) == before
+    identity = client.get(f"/api/tracks/{ids['track']}").json()["identity"]
+    assert identity["person_id"] == other
+    assert identity["source"] == "operator"
+    assert resp.json()["template_created"] is False
+    assert _last_payload(conn, "identification.confirm")["template_created"] is False
+    assert client.get(f"/api/persons/{other}").json()["person"]["status"] == "unenrolled"
+
+
+def test_confirm_with_enroll_creates_the_template(
+    client: TestClient, conn: sqlite3.Connection, settings: Settings
+) -> None:
+    ids = _enrollable(conn, settings)
+    other = client.post("/api/persons", json={"display_name": "Someone Else"}).json()["id"]
+    before = _templates(conn)
+
+    resp = client.post(
+        "/api/identifications",
+        json={
+            "track_id": ids["track"],
+            "decision": "confirm",
+            "person_id": other,
+            "enroll": True,
+        },
+    )
+
+    assert resp.status_code == 201
+    assert _templates(conn) == before + 1
+    assert resp.json()["template_created"] is True
+    assert _last_payload(conn, "identification.confirm")["template_created"] is True
+    detail = client.get(f"/api/persons/{other}").json()
+    assert detail["person"]["status"] == "enrolled"
+    assert [t["created_by"] for t in detail["templates"]] == [settings.operator_name]
+
+
+def test_new_person_is_always_bootstrapped_with_one_template(
+    client: TestClient, conn: sqlite3.Connection, settings: Settings
+) -> None:
+    """Without it the person is born unenrolled and could never match anything."""
+    ids = _enrollable(conn, settings)
+    before = _templates(conn)
+
+    resp = client.post(
+        "/api/identifications",
+        json={"track_id": ids["track"], "decision": "new", "new_name": "Bootstrapped"},
+    )
+
+    assert resp.status_code == 201
+    assert _templates(conn) == before + 1
+    assert resp.json()["template_created"] is True
+    assert _last_payload(conn, "identification.new")["template_created"] is True
+    created = client.get("/api/persons", params={"q": "Bootstrapped"}).json()["items"]
+    assert [(p["status"], p["template_count"]) for p in created] == [("enrolled", 1)]
+
+
+def test_a_new_person_that_could_not_be_enrolled_says_so_on_the_response(
+    client: TestClient, conn: sqlite3.Connection, settings: Settings
+) -> None:
+    """The silent gallery hole: `new` on a track with no quality-passing crop saves the
+    decision, creates the person, and enrols nothing. The response has to admit that, or
+    the operator is told "saved" about a person who can never be matched."""
+    ids = seed_gallery(conn)  # no embedding for the active embedder: nothing to enrol from
+    with transaction(conn):
+        conn.execute(
+            "UPDATE tracks SET best_detection_id = ? WHERE id = ?",
+            (ids["detection"], ids["track"]),
+        )
+    before = _templates(conn)
+
+    resp = client.post(
+        "/api/identifications",
+        json={"track_id": ids["track"], "decision": "new", "new_name": "Unenrollable"},
+    )
+
+    assert resp.status_code == 201
+    assert resp.json()["template_created"] is False
+    assert _templates(conn) == before
+    created = client.get("/api/persons", params={"q": "Unenrollable"}).json()["items"]
+    assert [(p["status"], p["template_count"], p["crop_sha256"]) for p in created] == [
+        ("unenrolled", 0, None)
+    ]
+    # The decision itself still stands: tagging a track we cannot enrol from is valid.
+    identity = client.get(f"/api/tracks/{ids['track']}").json()["identity"]
+    assert identity["source"] == "operator"
+
+
+def test_reject_refuses_an_enroll_request(
+    client: TestClient, conn: sqlite3.Connection, settings: Settings
+) -> None:
+    ids = _enrollable(conn, settings)
+    resp = client.post(
+        "/api/identifications",
+        json={"track_id": ids["track"], "decision": "reject", "enroll": True},
+    )
+    assert resp.status_code == 422
+    assert _templates(conn) == 1
+
+
+def test_review_bulk_carries_the_enroll_opt_in(
+    client: TestClient, conn: sqlite3.Connection, settings: Settings
+) -> None:
+    ids = _enrollable(conn, settings)
+    other = client.post("/api/persons", json={"display_name": "Someone Else"}).json()["id"]
+    before = _templates(conn)
+    decision = {"track_id": ids["track"], "decision": "confirm", "person_id": other}
+
+    plain = client.post("/api/review/bulk", json={"decisions": [decision]})
+    assert plain.json() == {"applied": 1, "errors": []}
+    assert _templates(conn) == before
+
+    enrolling = client.post(
+        "/api/review/bulk", json={"decisions": [{**decision, "enroll": True}]}
+    )
+    assert enrolling.json() == {"applied": 1, "errors": []}
+    assert _templates(conn) == before + 1
+
+
+# Invariant 7: hash every ingested file (SHA-256) before processing.
+def test_ingest_hashes_and_stores_by_content(
+    conn: sqlite3.Connection, settings: Settings, tmp_path: Path
+) -> None:
+    settings.ensure_dirs()
+    encoded = io.BytesIO()
+    Image.fromarray(np.full((32, 32, 3), 128, dtype=np.uint8)).save(encoded, format="PNG")
+    payload = encoded.getvalue()
+    digest = hashlib.sha256(payload).hexdigest()
+    first_path = tmp_path / "first.png"
+    first_path.write_bytes(payload)
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO cases (id, name, authorization_basis, created_at, created_by) "
+            "VALUES ('case-1', 'Case', 'test warrant', ?, 'tester')",
+            (audit.now_ts(),),
+        )
+
+    first = ingest_file(conn, settings, case_id="case-1", src=first_path, actor="tester")
+
+    assert first.sha256 == digest
+    assert first.reused is False
+    stored = settings.media_dir / storage.relative_path_for(digest)
+    assert stored.read_bytes() == payload
+    row = conn.execute("SELECT sha256, path, status FROM media WHERE id = ?", (first.media_id,))
+    media = row.fetchone()
+    assert media["sha256"] == digest
+    # Status is 'new' because the hash and the store happen before any processing.
+    assert media["status"] == "new"
+
+    # The same bytes under a different filename are the same evidence.
+    second_path = tmp_path / "renamed.png"
+    second_path.write_bytes(payload)
+    second = ingest_file(conn, settings, case_id="case-1", src=second_path, actor="tester")
+
+    assert second.reused is True
+    assert second.media_id == first.media_id
+    assert conn.execute("SELECT COUNT(*) AS n FROM media").fetchone()["n"] == 1
 
 
 # Invariant 6: the audit log is append-only.

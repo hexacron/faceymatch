@@ -13,15 +13,15 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 
 from app.api.deps import ConnDep, SettingsDep
-from app.jobs import enqueue, get
+from app.jobs import JobKind, JobStatus, enqueue, get
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
 
 class JobOut(BaseModel):
     id: str
-    kind: str
-    status: str
+    kind: JobKind
+    status: JobStatus
     params: dict[str, Any]
     progress: dict[str, Any]
     error: str | None
@@ -33,6 +33,17 @@ class JobOut(BaseModel):
 def enqueue_audit_verify(conn: ConnDep, settings: SettingsDep) -> JobOut:
     """Queue a full hash-chain verification. The worker records the result in the chain."""
     job = enqueue(conn, kind="audit_verify", actor=settings.operator_name)
+    return JobOut(**asdict(job))
+
+@router.post("/rematch", response_model=JobOut, status_code=status.HTTP_202_ACCEPTED)
+def enqueue_rematch(conn: ConnDep, settings: SettingsDep) -> JobOut:
+    """Queue block-matrix re-matching from stored track means; no media re-decode."""
+    job = enqueue(
+        conn,
+        kind="rematch",
+        actor=settings.operator_name,
+        params={"reason": "operator_request"},
+    )
     return JobOut(**asdict(job))
 
 

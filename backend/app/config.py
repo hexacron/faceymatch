@@ -50,13 +50,30 @@ class Settings(BaseSettings):
     sample_fps: float = 3.0
     min_embed_px: int = 80
     max_yaw: float = 35.0
+    # Laplacian variance of the detection box resampled to the 112x112 embed size, so the
+    # number is a focus measure and not a resolution measure (see pipeline/quality.py).
+    # 40.0 keeps 100% of 58 fixture faces at 1x and 98% upscaled 2.5x, while rejecting
+    # every face blurred at gaussian radius >= 1.5.
     min_sharpness: float = 40.0
     min_det_score: float = 0.6
+    nms_iou: float = 0.3
     embed_k: int = 5
     top_k: int = 3
+    # Spec 6.4 offers mean-of-top-3 once a person has 5+ templates; max is the default
+    # because it is what the calibration harness scores against.
+    person_score_mode: Literal["max", "mean_top3"] = "max"
+    # Re-match scores track means against the gallery in blocks (spec 6.2), never row by row.
+    rematch_block_size: int = 4096
+
+    # Ingest
+    max_upload_bytes: int = 256 * 1024 * 1024
+    # Screen capture (macOS). An interactive selection waits on the operator, so the
+    # ceiling is a UX timeout, not a machine one: past it we report a cancelled capture.
+    capture_timeout_seconds: float = 120.0
 
     # Calibration (spec 10)
     fpir_target: float = 1e-3
+    eval_min_identities: int = 5
 
     # Worker
     worker_poll_seconds: float = 0.5

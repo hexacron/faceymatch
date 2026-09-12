@@ -6,6 +6,8 @@ when the weights are not provisioned yet (license: null).
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter
 from pydantic import BaseModel
 
@@ -13,6 +15,7 @@ from app import audit
 from app.api.deps import ConnDep, LockDep, SettingsDep
 from app.db.migrate import current_version
 from app.models_lock import status as model_status
+from app.pipeline.capture import capability as capture_capability
 
 router = APIRouter(prefix="/api", tags=["health"])
 
@@ -33,8 +36,21 @@ class ThresholdSetOut(BaseModel):
     execution_provider: str | None
 
 
+class CaptureCapabilityOut(BaseModel):
+    """Whether `POST /api/capture` can work here, so the UI can disable it with a reason.
+
+    `available` is the only field the button needs; `reason` is non-null exactly when
+    `available` is false.
+    """
+
+    available: bool
+    platform_supported: bool
+    binary_present: bool
+    reason: str | None
+
+
 class HealthOut(BaseModel):
-    status: str
+    status: Literal["ok"]
     version: str
     db_path: str
     migration_version: int
@@ -43,6 +59,7 @@ class HealthOut(BaseModel):
     execution_provider: str
     allow_noncommercial_models: bool
     threshold_set: ThresholdSetOut | None
+    capture: CaptureCapabilityOut
     audit_head_seq: int
     audit_head_hash: str | None
 
@@ -67,6 +84,7 @@ def healthz(conn: ConnDep, settings: SettingsDep, lock: LockDep) -> HealthOut:
             execution_provider=row["execution_provider"],
         )
     )
+    capture = capture_capability()
 
     return HealthOut(
         status="ok",
@@ -87,6 +105,12 @@ def healthz(conn: ConnDep, settings: SettingsDep, lock: LockDep) -> HealthOut:
         execution_provider=settings.execution_provider,
         allow_noncommercial_models=settings.allow_noncommercial_models,
         threshold_set=threshold_set,
+        capture=CaptureCapabilityOut(
+            available=capture.available,
+            platform_supported=capture.platform_supported,
+            binary_present=capture.binary_present,
+            reason=capture.reason,
+        ),
         audit_head_seq=head_seq,
         audit_head_hash=None if head_seq == 0 else head_hash,
     )

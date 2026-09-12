@@ -16,11 +16,14 @@ from collections.abc import Callable
 from types import FrameType
 from typing import Any
 
-from app import audit
+from app import audit, models_lock
 from app.config import Settings, get_settings
+from app.core.registry import get_active_models
 from app.db.conn import connect, transaction
 from app.db.migrate import migrate
 from app.jobs import Job, claim_next, finish
+from app.pipeline.matching import rematch
+from app.pipeline.process import mark_failed, process_image
 
 log = logging.getLogger("app.worker")
 
@@ -58,9 +61,39 @@ def handle_audit_verify(
         )
     return outcome
 
+def handle_process(
+    conn: sqlite3.Connection, job: Job, settings: Settings
+) -> dict[str, Any]:
+    media_id = job.params.get("media_id")
+    if not isinstance(media_id, str) or not media_id:
+        raise ValueError("process job requires a string media_id")
+    lock = models_lock.verify(settings.models_dir)
+    active = get_active_models(settings, lock)
+    result = process_image(
+        conn, settings, active, media_id=media_id, actor=settings.operator_name
+    )
+    return result.as_progress()
+
+
+def handle_rematch(
+    conn: sqlite3.Connection, job: Job, settings: Settings
+) -> dict[str, Any]:
+    lock = models_lock.verify(settings.models_dir)
+    active = get_active_models(settings, lock)
+    return rematch(
+        conn,
+        settings,
+        embedder_model_id=active.embedder_model_id,
+        execution_provider=active.execution_provider,
+        actor=settings.operator_name,
+    ).as_progress()
+
+
 
 HANDLERS: dict[str, Handler] = {
     "audit_verify": handle_audit_verify,
+    "process": handle_process,
+    "rematch": handle_rematch,
 }
 
 
@@ -87,6 +120,15 @@ def run_once(conn: sqlite3.Connection, settings: Settings) -> Job | None:
             status="failed",
             error=f"{type(exc).__name__}: {exc}",
         )
+        if job.kind == "process":
+            media_id = job.params.get("media_id")
+            if isinstance(media_id, str):
+                mark_failed(
+                    conn,
+                    media_id=media_id,
+                    actor=settings.operator_name,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
         return job
     finish(
         conn,

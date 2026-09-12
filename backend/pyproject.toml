@@ -11,6 +11,9 @@ dependencies = [
     "sqlite-vec>=0.1.6",
     "onnxruntime>=1.30.0",
     "numpy>=2.5.3",
+    "pillow>=12.3.0",
+    "pillow-heif>=1.7.0",
+    "python-multipart>=0.0.20",
 ]
 
 [project.optional-dependencies]

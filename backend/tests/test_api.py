@@ -10,7 +10,7 @@ from app.config import Settings
 def test_healthz_reports_schema_models_and_chain_head(client: TestClient) -> None:
     body = client.get("/api/healthz").json()
     assert body["status"] == "ok"
-    assert body["migration_version"] == 1
+    assert body["migration_version"] == 2
     assert body["embedder"]["model_id"] == "sface-2021dec"
     # No weights provisioned in a fresh install: C7 banner shows "not provisioned".
     assert body["embedder"]["present"] is False
@@ -43,6 +43,68 @@ def test_case_creation_is_audited(client: TestClient) -> None:
 def test_case_creation_requires_an_authorization_basis(client: TestClient) -> None:
     response = client.post("/api/cases", json={"name": "No basis"})
     assert response.status_code == 422
+
+
+def test_authorization_basis_can_be_corrected_and_the_old_text_stays_in_the_chain(
+    client: TestClient,
+) -> None:
+    """Section 12 makes this field the record justifying biometric processing, so a wrong
+    one must be correctable — and the correction must show what it used to say."""
+    case = client.post(
+        "/api/cases",
+        json={"name": "Op Kingfisher", "authorization_basis": "personal test images only"},
+    ).json()
+
+    amended = client.patch(
+        f"/api/cases/{case['id']}",
+        json={
+            "authorization_basis": "warrant 12/4, investigative",
+            "reason": "original text understated the material",
+        },
+    )
+
+    assert amended.status_code == 200
+    assert amended.json() == {**case, "authorization_basis": "warrant 12/4, investigative"}
+    assert (
+        client.get(f"/api/cases/{case['id']}").json()["authorization_basis"]
+        == "warrant 12/4, investigative"
+    )
+
+    entries = client.get("/api/audit").json()["entries"]
+    amendments = [e for e in entries if e["action"] == "case.amend_authorization"]
+    assert len(amendments) == 1
+    assert amendments[0]["object_id"] == case["id"]
+    assert amendments[0]["case_id"] == case["id"]
+    assert amendments[0]["payload"] == {
+        "previous_authorization_basis": "personal test images only",
+        "authorization_basis": "warrant 12/4, investigative",
+        "reason": "original text understated the material",
+    }
+
+
+def test_amending_an_unknown_case_is_404_and_writes_nothing(client: TestClient) -> None:
+    before = client.get("/api/audit").json()["head_seq"]
+
+    response = client.patch(
+        "/api/cases/does-not-exist", json={"authorization_basis": "anything"}
+    )
+
+    assert response.status_code == 404
+    assert client.get("/api/audit").json()["head_seq"] == before
+
+
+def test_an_amendment_cannot_blank_the_authorization_basis(client: TestClient) -> None:
+    case = client.post(
+        "/api/cases", json={"name": "Op Kingfisher", "authorization_basis": "warrant 12/4"}
+    ).json()
+
+    assert (
+        client.patch(f"/api/cases/{case['id']}", json={"authorization_basis": ""}).status_code
+        == 422
+    )
+    assert (
+        client.get(f"/api/cases/{case['id']}").json()["authorization_basis"] == "warrant 12/4"
+    )
 
 
 def test_missing_case_is_404(client: TestClient) -> None:

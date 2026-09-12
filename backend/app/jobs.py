@@ -25,8 +25,8 @@ JOB_KINDS: frozenset[str] = frozenset(get_args(JobKind))
 @dataclass(frozen=True, slots=True)
 class Job:
     id: str
-    kind: str
-    status: str
+    kind: JobKind
+    status: JobStatus
     params: dict[str, Any]
     progress: dict[str, Any]
     error: str | None
@@ -37,8 +37,8 @@ class Job:
 def row_to_job(row: sqlite3.Row) -> Job:
     return Job(
         id=str(row["id"]),
-        kind=str(row["kind"]),
-        status=str(row["status"]),
+        kind=row["kind"],
+        status=row["status"],
         params=json.loads(row["params_json"]),
         progress=json.loads(row["progress"]),
         error=row["error"],

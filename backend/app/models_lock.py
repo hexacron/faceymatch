@@ -24,6 +24,8 @@ LOCK_FILENAME = "models.lock"
 _WEIGHT_SUFFIXES = frozenset({".onnx"})
 _CHUNK = 1024 * 1024
 
+ModelKind = Literal["detector", "embedder"]
+
 
 class ModelEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -31,7 +33,7 @@ class ModelEntry(BaseModel):
     id: str
     name: str
     version: str
-    kind: Literal["detector", "embedder"]
+    kind: ModelKind
     file: str
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     license: str
