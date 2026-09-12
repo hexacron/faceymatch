@@ -477,6 +477,43 @@ def test_a_rematch_already_waiting_is_not_queued_twice(
     ).fetchone()["n"] == 1
 
 
+def test_a_killed_job_is_requeued_and_resumes_rather_than_blocking_the_queue(
+    conn: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A worker killed mid-reembed must not leave a `running` row nothing can clear."""
+    seed(conn, settings)
+    monkeypatch.setattr(worker.models_lock, "verify", lambda models_dir: None)
+    monkeypatch.setattr(
+        worker,
+        "get_active_models",
+        lambda *_: models_for(ShadeEmbedder(model_id=NEW_MODEL, dim=NEW_DIM, fail_after=2)),
+    )
+    job_id = enqueue_reembed(conn)
+    worker.run_once(conn, settings)
+    # Simulate the kill: the process died before `finish` could mark the job either way.
+    with transaction(conn):
+        conn.execute("UPDATE jobs SET status = 'running', error = NULL WHERE id = ?", (job_id,))
+
+    assert jobs.requeue_running(conn, actor="tester") == [job_id]
+
+    healthy = ShadeEmbedder(model_id=NEW_MODEL, dim=NEW_DIM)
+    monkeypatch.setattr(worker, "get_active_models", lambda *_: models_for(healthy))
+    worker.run_once(conn, settings)
+
+    done = jobs.get(conn, job_id)
+    assert done is not None
+    assert done.status == "done", done.error
+    assert done.progress["crops_embedded"] == 4
+    duplicates = conn.execute(
+        "SELECT detection_id, COUNT(*) AS n FROM detection_embeddings "
+        "WHERE embedder_model_id = ? GROUP BY detection_id HAVING n > 1",
+        (NEW_MODEL,),
+    ).fetchall()
+    assert duplicates == []
+    assert audit.verify(conn).ok
+
+
+
 def test_a_recorded_crop_missing_from_the_store_is_counted_not_guessed(
     conn: sqlite3.Connection, settings: Settings
 ) -> None:

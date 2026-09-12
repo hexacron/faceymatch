@@ -25,7 +25,7 @@ from app.config import Settings, get_settings
 from app.core.registry import get_active_models
 from app.db.conn import connect, transaction
 from app.db.migrate import migrate
-from app.jobs import Job, claim_next, finish
+from app.jobs import Job, claim_next, finish, requeue_running
 from app.pipeline.matching import rematch
 from app.pipeline.process import mark_failed, process_image
 from app.pipeline.reembed import reembed
@@ -189,6 +189,9 @@ class Worker:
         conn = connect(self.settings.db_path)
         try:
             migrate(conn)
+            abandoned = requeue_running(conn, actor=self.settings.operator_name)
+            if abandoned:
+                log.info("requeued %d job(s) left running by a previous worker", len(abandoned))
             signal.signal(signal.SIGTERM, self.request_stop)
             signal.signal(signal.SIGINT, self.request_stop)
             log.info("worker ready, polling %s", self.settings.db_path)

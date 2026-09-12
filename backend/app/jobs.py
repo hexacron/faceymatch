@@ -133,6 +133,44 @@ def claim_next(conn: sqlite3.Connection, *, actor: str) -> Job | None:
     return get(conn, job_id)
 
 
+def requeue_running(conn: sqlite3.Connection, *, actor: str) -> list[str]:
+    """Return jobs a killed worker left mid-flight to the queue. Called at worker startup.
+
+    Safe only because there is exactly one worker process (D10): if it is starting, nothing
+    else can be running a job, so every row still marked `running` belongs to a process that
+    died. Handlers resume from `jobs.progress` rather than repeating committed work
+    (spec 6.2, "Job resume").
+
+    Without this a killed job stays `running` for ever, which is not just a stale row: it
+    blocks `PATCH /api/config`, whose whole point is that a re-embed in flight must finish
+    before the configuration moves again.
+    """
+    with transaction(conn):
+        rows = conn.execute(
+            "SELECT id, kind FROM jobs WHERE status = 'running' ORDER BY created_at, id"
+        ).fetchall()
+        if not rows:
+            return []
+        now = audit.now_ts()
+        requeued: list[str] = []
+        for row in rows:
+            job_id = str(row["id"])
+            conn.execute(
+                "UPDATE jobs SET status = 'queued', updated_at = ? WHERE id = ?",
+                (now, job_id),
+            )
+            audit.append(
+                conn,
+                actor=actor,
+                action="job.requeue",
+                object_type="job",
+                object_id=job_id,
+                payload={"kind": str(row["kind"]), "reason": "worker restarted mid-job"},
+            )
+            requeued.append(job_id)
+    return requeued
+
+
 def write_progress(
     conn: sqlite3.Connection, job_id: str, progress: dict[str, Any]
 ) -> None:
