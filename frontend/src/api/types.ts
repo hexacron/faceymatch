@@ -428,6 +428,18 @@ export type Template = {
   created_by: string;
 };
 
+/**
+ * Body of `POST /api/persons/{person_id}/templates/{template_id}/revoke`.
+ *
+ * Answers with the `Template` in its revoked state. 404 when the person or the
+ * template is unknown, or when that template belongs to someone else; 409 when
+ * it was already revoked, which is a race rather than a failure.
+ */
+export type TemplateRevoke = {
+  /** Why it is leaving the gallery, for the audit log. Null when none was given. */
+  reason: string | null;
+};
+
 /** One track where this person appears (spec 6.8 person page). */
 export type Appearance = {
   track_id: string;

@@ -23,6 +23,23 @@ export const NO_TEMPLATE_REMEDY =
   "Tag a sharper or larger face of them — one whose crop passes the quality gate — and confirm it onto this person with “Also add this crop as a template” ticked.";
 
 /**
+ * Said when the person once had templates and every one of them is revoked.
+ * Distinct from {@link NO_TEMPLATE_EXPLANATION}: nothing failed here, the
+ * operator took the face out on purpose, and the rows are still on the page.
+ */
+export const ALL_TEMPLATES_REVOKED =
+  "Every template of this person is revoked, so they are no longer in the gallery: matching can never propose them as a candidate.";
+
+/**
+ * Why a duplicate face is worse than untidy, said where the operator can act
+ * on it. Two persons holding the same face score the same against it, so the
+ * margin rule that guards auto-accept has nothing to separate them and refuses
+ * to name either, however high the score is.
+ */
+export const DUPLICATE_FACE_TIE_EXPLANATION =
+  "If another person holds a template of this same face, both score alike on every match and the margin rule refuses to name either, so even a 0.99 match stays ambiguous forever — revoking the duplicate template is what breaks the tie.";
+
+/**
  * Said when a tag was saved but its crop could not be donated. The person may
  * already be in the gallery, so this is about the crop, not about them.
  */

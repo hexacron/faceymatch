@@ -1,6 +1,11 @@
+import { useState } from "react";
+
 import type { Appearance, PersonDetail } from "../api/types";
 import { BandPill, SourceBadge } from "../components/BandPill";
+import { RevokeTemplateControl, type GalleryNotice } from "../components/GalleryControls";
 import {
+  ALL_TEMPLATES_REVOKED,
+  DUPLICATE_FACE_TIE_EXPLANATION,
   GalleryState,
   NO_TEMPLATE_EXPLANATION,
   NO_TEMPLATE_REMEDY,
@@ -34,6 +39,13 @@ function AppearanceCard({ appearance }: { appearance: Appearance }) {
 
 export default function PersonDetailView({ personId }: { personId: string }) {
   const detail = useResource<PersonDetail>(`/api/persons/${encodeURIComponent(personId)}`);
+  /**
+   * One place for the outcome of a revoke. It lives above the cards
+   * because the control that produced it disappears the moment the change
+   * lands — the template stops being active, so there is nothing left to
+   * revoke and nowhere for the message to sit.
+   */
+  const [notice, setNotice] = useState<GalleryNotice | null>(null);
 
   return (
     <>
@@ -50,6 +62,9 @@ export default function PersonDetailView({ personId }: { personId: string }) {
           const appearances = [...data.appearances].sort((left, right) =>
             left.ingested_at.localeCompare(right.ingested_at),
           );
+          // The matcher only ever sees active templates, so this is what
+          // "in the gallery" means on this page.
+          const activeCount = data.templates.filter((item) => item.status === "active").length;
           return (
             <>
               <section className="panel person-summary" aria-labelledby="person-name">
@@ -58,7 +73,7 @@ export default function PersonDetailView({ personId }: { personId: string }) {
                   <p>{data.person.notes ?? "No notes."}</p>
                 </div>
                 <dl className="facts">
-                  <dt>Status</dt><dd><GalleryState person={data.person} explain={false} /></dd>
+                  <dt>Status</dt><dd className="state-cell"><GalleryState person={data.person} explain={true} /></dd>
                   <dt>Templates</dt><dd>{data.person.template_count}</dd>
                   <dt>Created</dt><dd className="mono">{formatTs(data.person.created_at)}</dd>
                   <dt>Created by</dt><dd>{data.person.created_by}</dd>
@@ -66,16 +81,31 @@ export default function PersonDetailView({ personId }: { personId: string }) {
                 </dl>
               </section>
 
+              {notice !== null && (
+                <p
+                  className={`notice ${notice.tone}`}
+                  role={notice.tone === "error" ? "alert" : "status"}
+                >
+                  {notice.text}
+                </p>
+              )}
+
               <section aria-labelledby="templates-heading">
                 <h2 id="templates-heading">Templates</h2>
-                {data.templates.length === 0 ? (
-                  <p className="notice">
-                    {NO_TEMPLATE_EXPLANATION} {NO_TEMPLATE_REMEDY}
+                <p className="notice">{DUPLICATE_FACE_TIE_EXPLANATION}</p>
+                {activeCount === 0 && (
+                  <p className="notice attention">
+                    {data.templates.length === 0 ? NO_TEMPLATE_EXPLANATION : ALL_TEMPLATES_REVOKED}{" "}
+                    {NO_TEMPLATE_REMEDY}
                   </p>
-                ) : (
+                )}
+                {data.templates.length > 0 && (
                   <div className="template-grid">
                     {data.templates.map((template) => (
-                      <article className="panel template-card" key={template.id}>
+                      <article
+                        className={`panel template-card${template.status === "revoked" ? " template-revoked" : ""}`}
+                        key={template.id}
+                      >
                         {template.crop_sha256 === null ? (
                           <div className="crop-missing">No crop</div>
                         ) : (
@@ -87,6 +117,19 @@ export default function PersonDetailView({ personId }: { personId: string }) {
                           <p className="compact">Quality {template.quality?.toFixed(3) ?? "—"}</p>
                           <p className="muted compact">{template.embedder_model_id}</p>
                         </div>
+                        {template.status === "active" ? (
+                          <RevokeTemplateControl
+                            personId={data.person.id}
+                            template={template}
+                            onOutcome={setNotice}
+                            onRefresh={detail.reload}
+                          />
+                        ) : (
+                          <p className="template-actions muted compact">
+                            Out of the matching gallery. The row, the crop and the audit trail are
+                            kept; revoking cannot be undone, so re-enrol this face to use it again.
+                          </p>
+                        )}
                       </article>
                     ))}
                   </div>
