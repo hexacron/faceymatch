@@ -2,7 +2,11 @@ import { useState } from "react";
 
 import type { Appearance, PersonDetail } from "../api/types";
 import { BandPill, SourceBadge } from "../components/BandPill";
-import { RevokeTemplateControl, type GalleryNotice } from "../components/GalleryControls";
+import {
+  DoNotEnrollToggle,
+  RevokeTemplateControl,
+  type GalleryNotice,
+} from "../components/GalleryControls";
 import {
   ALL_TEMPLATES_REVOKED,
   DUPLICATE_FACE_TIE_EXPLANATION,
@@ -40,7 +44,7 @@ function AppearanceCard({ appearance }: { appearance: Appearance }) {
 export default function PersonDetailView({ personId }: { personId: string }) {
   const detail = useResource<PersonDetail>(`/api/persons/${encodeURIComponent(personId)}`);
   /**
-   * One place for the outcome of a revoke. It lives above the cards
+   * One place for the outcome of a revoke or a park. It lives above the cards
    * because the control that produced it disappears the moment the change
    * lands — the template stops being active, so there is nothing left to
    * revoke and nowhere for the message to sit.
@@ -71,6 +75,11 @@ export default function PersonDetailView({ personId }: { personId: string }) {
                 <div>
                   <h2 id="person-name" className="title-case">{data.person.display_name}</h2>
                   <p>{data.person.notes ?? "No notes."}</p>
+                  <DoNotEnrollToggle
+                    person={data.person}
+                    onOutcome={setNotice}
+                    onRefresh={detail.reload}
+                  />
                 </div>
                 <dl className="facts">
                   <dt>Status</dt><dd className="state-cell"><GalleryState person={data.person} explain={true} /></dd>

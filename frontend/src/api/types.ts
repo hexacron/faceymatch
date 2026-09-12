@@ -416,6 +416,11 @@ export type PersonCreate = {
   notes?: string;
 };
 
+/** Body of `PATCH /api/persons/{person_id}`. */
+export type PersonUpdate = {
+  do_not_enroll: boolean;
+};
+
 export type Template = {
   id: string;
   detection_id: string | null;

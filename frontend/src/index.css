@@ -238,6 +238,8 @@ tbody tr:hover { background: #1d2128; }
 .template-actions { grid-column: 1 / -1; margin: 0; padding-top: 0.6rem; border-top: 1px solid var(--border); }
 .revoke-form { display: grid; gap: 0.5rem; }
 .template-action-row { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.person-control { margin-top: 0.9rem; }
+.checkbox-text { padding-left: 0.45rem; }
 .appearance-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr)); gap: 0.75rem; }
 .appearance-card { display: grid; grid-template-columns: 7rem minmax(0, 1fr); gap: 0.9rem; padding: 0.75rem; background: var(--panel); border: 1px solid var(--border); border-radius: 7px; }
 .appearance-card img, .appearance-card .crop-missing { width: 7rem; height: 7rem; object-fit: cover; border-radius: 4px; }
