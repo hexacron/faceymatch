@@ -24,6 +24,10 @@ data/
 *.db-wal
 *.db-shm
 
+# Calibration output. Its SHA-256 lives in the threshold_set row; the file itself is
+# per-run local output, carried by the case export bundle rather than by git.
+eval/report.json
+
 # Test fixtures (FIXTURES_DIR). Never commit face images.
 fixtures/
 
