@@ -12,7 +12,13 @@ from app import audit
 from app.api.deps import ConnDep, SettingsDep
 from app.core.types import Band, IdentitySource, PersonStatus, TemplateStatus
 from app.db.conn import transaction
-from app.enrollment import EnrollmentError, create_template_from_detection
+from app.enrollment import (
+    EnrollmentError,
+    TemplateAlreadyRevokedError,
+    TemplateNotFoundError,
+    create_template_from_detection,
+    revoke_template,
+)
 from app.ids import new_id
 from app.jobs import enqueue
 
@@ -44,6 +50,10 @@ class PersonListOut(BaseModel):
 
 class TemplateCreate(BaseModel):
     detection_id: str = Field(min_length=1)
+
+
+class TemplateRevoke(BaseModel):
+    reason: str | None = Field(default=None, max_length=2000)
 
 
 class TemplateOut(BaseModel):
@@ -244,6 +254,54 @@ def create_template(
         )
     if row is None:
         raise HTTPException(status_code=500, detail="template write failed")
+    return _template_out(row)
+
+
+@router.post("/{person_id}/templates/{template_id}/revoke", response_model=TemplateOut)
+def revoke_person_template(
+    person_id: str,
+    template_id: str,
+    body: TemplateRevoke,
+    conn: ConnDep,
+    settings: SettingsDep,
+) -> TemplateOut:
+    """Withdraw one face from the gallery. One-way: re-enrol, never un-revoke.
+
+    A duplicate call is a 409 that rolls back, so the audit log carries exactly one
+    `template.revoke` entry per template however many times the button is pressed.
+    """
+    with transaction(conn):
+        try:
+            revoke_template(
+                conn,
+                person_id=person_id,
+                template_id=template_id,
+                reason=body.reason,
+                actor=settings.operator_name,
+            )
+        except TemplateNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+            ) from exc
+        except TemplateAlreadyRevokedError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+            ) from exc
+    # The gallery shrank, so every stored auto identity scored against it is stale. Same
+    # enqueue as enrolment; operator decisions survive the job by invariant 5.
+    enqueue(
+        conn,
+        kind="rematch",
+        actor=settings.operator_name,
+        params={"reason": "template_revoked", "template_id": template_id},
+    )
+    row = conn.execute(
+        "SELECT t.*, d.crop_sha256 FROM templates t "
+        "LEFT JOIN detections d ON d.id = t.detection_id WHERE t.id = ?",
+        (template_id,),
+    ).fetchone()
+    if row is None:  # pragma: no cover - the revoke above just committed
+        raise HTTPException(status_code=500, detail="template read failed after revoke")
     return _template_out(row)
 
 
