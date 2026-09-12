@@ -53,6 +53,19 @@ export type CaptureStatus = {
   reason: string | null;
 };
 
+/**
+ * The C5 gate, decided by the backend. `reason` is non-null exactly when
+ * `allowed` is false; `warning` is a caveat that stands even when it is true
+ * (a set calibrated against a much smaller gallery, say). Read it rather than
+ * re-deriving it from the threshold set: the gate also depends on state the
+ * threshold set does not carry, such as a re-embed in flight.
+ */
+export type AutoAcceptState = {
+  allowed: boolean;
+  reason: string | null;
+  warning: string | null;
+};
+
 export type Health = {
   status: string;
   version: string;
@@ -64,6 +77,8 @@ export type Health = {
   allow_noncommercial_models: boolean;
   /** Null until a threshold set is activated. No auto-accept without one (C5). */
   threshold_set: ThresholdSetStatus | null;
+  /** Whether anything may be auto-accepted right now (C5, invariant 4). */
+  auto_accept: AutoAcceptState;
   /** Screen-capture support on this machine. */
   capture: CaptureStatus;
   audit_head_seq: number;
@@ -526,11 +541,13 @@ export type ThresholdSetList = {
 
 /* ------------------------------------------------------------------ models */
 
+export type ModelKind = "detector" | "embedder";
+
 export type ModelInfo = {
   id: string;
   name: string;
   version: string;
-  kind: "detector" | "embedder";
+  kind: ModelKind;
   sha256: string;
   /** From `models.lock`. Null until the weight file is provisioned (C2, C7). */
   license: string | null;
@@ -543,4 +560,94 @@ export type ModelsInfo = {
   items: ModelInfo[];
   execution_provider: string;
   allow_noncommercial_models: boolean;
+};
+
+/* ------------------------------------------------------------------ config */
+
+/** Spec 6.4: `max` is one template, `mean_top3` needs five or more. */
+export type PersonScoreMode = "max" | "mean_top3";
+
+/**
+ * The settings `PATCH /api/config` will take. Everything else in `Settings` is
+ * environment-only and arrives under `readonly`.
+ */
+export type ConfigEditable = {
+  detector_model: string;
+  embedder_model: string;
+  min_embed_px: number;
+  max_yaw: number;
+  min_sharpness: number;
+  min_det_score: number;
+  sample_fps: number;
+  top_k: number;
+  person_score_mode: PersonScoreMode;
+};
+
+/** Facts about this deployment. Changing any of them means editing `.env` and restarting. */
+export type ConfigReadonly = {
+  execution_provider: string;
+  allow_noncommercial_models: boolean;
+  operator_name: string;
+  db_path: string;
+  models_dir: string;
+  max_upload_bytes: number;
+  fpir_target: number;
+  embed_k: number;
+  rematch_block_size: number;
+};
+
+/**
+ * A model the operator may pick. Distinct from {@link ModelInfo}: this one
+ * carries `commercial_use`, which with `allow_noncommercial_models` decides
+ * whether the backend would load it at all (invariant 9, C7), and drops the
+ * digest, which belongs on the license surface rather than on a picker.
+ */
+export type ConfigModel = {
+  id: string;
+  name: string;
+  version: string;
+  kind: ModelKind;
+  license: string | null;
+  commercial_use: boolean;
+  dim: number | null;
+  present: boolean;
+  active: boolean;
+};
+
+/**
+ * The job that has to finish before another model change is accepted. Only the
+ * two model-switch kinds can hold this slot, and only while unfinished: a
+ * settled job leaves `pending_job` null.
+ */
+export type ConfigPendingJob = {
+  id: string;
+  kind: "reembed" | "rematch";
+  status: "queued" | "running";
+};
+
+export type Config = {
+  editable: ConfigEditable;
+  readonly: ConfigReadonly;
+  models: ConfigModel[];
+  pending_job: ConfigPendingJob | null;
+};
+
+/**
+ * Body of `PATCH /api/config`. Only the keys that actually changed go in
+ * `changes`; an unknown or unchangeable key is a 400. `reason` is the audit
+ * justification and is required for a model change by the UI.
+ */
+export type ConfigPatchRequest = {
+  changes: Partial<ConfigEditable>;
+  reason: string | null;
+};
+
+/**
+ * The 200 of a PATCH: the new config, plus the jobs the change enqueued, in
+ * the order the worker will run them. An embedder change yields two, the
+ * re-embed then the re-match; a detector change yields none, because detection
+ * is never re-run on media that is already stored.
+ */
+export type ConfigPatchResult = Config & {
+  jobs_enqueued: string[];
 };
