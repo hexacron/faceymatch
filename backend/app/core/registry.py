@@ -5,7 +5,10 @@ through the `Detector` / `Embedder` interfaces (AGENTS.md code rules) and nothin
 a `.onnx` file. Three things this module owns:
 
 - the license gate: every load goes through `models_lock.assert_loadable`, so a
-  non-commercial model is refused unless ALLOW_NONCOMMERCIAL_MODELS is set (invariant 9, C7);
+  non-commercial model is refused unless the effective settings have
+  `allow_noncommercial_models` set (invariant 9, C7). The flag is an audited runtime
+  setting, and it is part of the cache key, so turning it off does not keep serving a
+  session built while it was on;
 - the execution provider that is *actually* in use. A CoreML request on a build without
   CoreML falls back to CPU with a logged warning, and `ActiveModels.execution_provider`
   reports the real provider, never the requested one -- `acceptance.build_gate` compares it

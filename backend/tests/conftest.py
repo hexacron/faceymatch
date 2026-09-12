@@ -43,6 +43,20 @@ def forbid_outbound_network(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(socket, "getaddrinfo", forbidden_resolution)
 
 
+@pytest.fixture(autouse=True)
+def isolate_settings_sources(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A test describes its own configuration; the machine's must not leak into it.
+
+    `Settings` reads the repo-root `.env` and the process environment. Both are real on a
+    developer's or the operator's machine, and a test that passes only because the local
+    `.env` happens to agree with it is not testing anything. Both sources are removed here,
+    so every fixture states the configuration it means.
+    """
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
+    for field in Settings.model_fields:
+        monkeypatch.delenv(field.upper(), raising=False)
+
+
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
     models_dir = tmp_path / "models"

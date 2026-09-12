@@ -2,15 +2,23 @@
 
 What is editable and what is not is a safety decision, not a UI convenience:
 
-- `allow_noncommercial_models` and `execution_provider` are read-only and environment-only.
-  A licensing gate the UI can flip is not a gate (invariant 9, C7), and a threshold set is
-  only reproducible on the execution provider it was calibrated on (spec 10), so moving the
-  provider from a web request would silently invalidate every calibrated band.
+- `execution_provider` is read-only and environment-only. A threshold set is only
+  reproducible on the provider it was calibrated on (spec 10), so moving the provider from
+  a web request would silently invalidate every calibrated band.
 - Threshold values are not here at all. They come from a calibration run and are activated
   by their own audited action (spec 10, `POST /api/threshold_sets/{id}/activate`). A
   threshold an operator can type is a threshold nobody measured.
 - `db_path`, `models_dir` and `operator_name` describe where the evidence lives and who is
   claiming it. Those belong to the install, not to a session.
+- `allow_noncommercial_models` *is* editable (invariant 9 as amended). The operator who
+  owns the installation decides what its licences permit; making them edit a file and
+  restart never made that decision more considered, only less visible. The friction is
+  gone, the record is not: enabling it requires a reason and writes `config.change` like
+  any other key, and the licence text stays on every model in this payload, in
+  `GET /api/models` and in the C7 banner — informational, not blocking.
+
+`models.lock` verification is untouched by any of this (invariant 8): unknown or
+SHA-mismatched weights are refused outright. That is integrity, not licensing.
 
 Every accepted change is written to `runtime_config` and audited as `config.change` with
 the previous value, the new value and the operator's reason, in one transaction with any
@@ -31,7 +39,7 @@ from app.api.deps import ConnDep, LockDep, SettingsDep
 from app.config import Settings
 from app.core import registry
 from app.db.conn import transaction
-from app.models_lock import ModelKind, ModelsLock
+from app.models_lock import ModelEntry, ModelKind, ModelsLock
 from app.pipeline.live import clear_gallery_cache
 from app.thresholds import seed_default_threshold_set
 
@@ -46,6 +54,9 @@ _PENDING_JOB_KINDS = ("reembed", "rematch")
 class EditableConfigOut(BaseModel):
     detector_model: str
     embedder_model: str
+    # Informational everywhere else; here it is the operator's decision to make, recorded
+    # with a reason when it is turned on (invariant 9 as amended, C7).
+    allow_noncommercial_models: bool
     min_embed_px: int
     max_yaw: float
     min_sharpness: float
@@ -57,7 +68,6 @@ class EditableConfigOut(BaseModel):
 
 class ReadonlyConfigOut(BaseModel):
     execution_provider: str
-    allow_noncommercial_models: bool
     operator_name: str
     db_path: str
     models_dir: str
@@ -68,6 +78,20 @@ class ReadonlyConfigOut(BaseModel):
 
 
 class ConfigModelOut(BaseModel):
+    """One models.lock entry, plus whether selecting it would actually be accepted.
+
+    `selectable` and `blocked_reason` come from the same `assert_model_usable` the PATCH
+    enforces, evaluated against the configuration as it stands now, so a picker built from
+    this list cannot offer something the endpoint would then refuse. `blocked_reason` is
+    non-null exactly when `selectable` is false, and it names the licence when the licence
+    is the cause — so a UI drafting a licence-flag change can tell that class of block from
+    the ones a flag will not fix (absent weights, digest mismatch, no adapter, not locked).
+
+    The active model gets no exemption. If the gate is off and a non-commercial model is
+    somehow running, it appears here as not selectable with the licence as the reason,
+    rather than looking fine because it happens to be the one in use.
+    """
+
     id: str
     name: str
     version: str
@@ -77,6 +101,8 @@ class ConfigModelOut(BaseModel):
     dim: int | None
     present: bool
     active: bool
+    selectable: bool
+    blocked_reason: str | None
 
 
 class PendingJobOut(BaseModel):
@@ -124,6 +150,13 @@ def patch_config(
     are left exactly as they are; the new detector applies to media processed from now on.
     Re-detecting stored media would rewrite evidence, which is a different operation with a
     different justification, and it is not this endpoint.
+
+    `allow_noncommercial_models` is validated against this request, not against what is
+    stored: enabling it and selecting a non-commercial embedder in one PATCH is a coherent
+    final state and is accepted. Turning it off while a non-commercial model is active is
+    refused with 409 rather than fixed silently — forcing the embedder back would re-embed
+    the whole gallery off a checkbox. Send both keys together to do it deliberately, and it
+    goes through the ordinary embedder-change consequences above.
     """
     blocking = _pending_job(conn, _BLOCKING_JOB_KINDS)
     if blocking is not None:
@@ -137,10 +170,14 @@ def patch_config(
         )
 
     try:
-        candidate = runtime_config.validate(settings, lock, body.changes)
+        candidate = runtime_config.validate(
+            settings, lock, body.changes, reason=body.reason
+        )
     except runtime_config.UnknownKeyError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except runtime_config.InvalidValueError as exc:
+    except runtime_config.StateConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except (runtime_config.InvalidValueError, runtime_config.ReasonRequiredError) as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
@@ -279,6 +316,7 @@ def _config_out(
         editable=EditableConfigOut(
             detector_model=settings.detector_model,
             embedder_model=settings.embedder_model,
+            allow_noncommercial_models=settings.allow_noncommercial_models,
             min_embed_px=settings.min_embed_px,
             max_yaw=settings.max_yaw,
             min_sharpness=settings.min_sharpness,
@@ -289,7 +327,6 @@ def _config_out(
         ),
         readonly=ReadonlyConfigOut(
             execution_provider=settings.execution_provider,
-            allow_noncommercial_models=settings.allow_noncommercial_models,
             operator_name=settings.operator_name,
             db_path=str(settings.db_path),
             models_dir=str(settings.models_dir),
@@ -298,23 +335,29 @@ def _config_out(
             embed_k=settings.embed_k,
             rematch_block_size=settings.rematch_block_size,
         ),
-        models=[
-            ConfigModelOut(
-                id=entry.id,
-                name=entry.name,
-                version=entry.version,
-                kind=entry.kind,
-                license=entry.license,
-                commercial_use=entry.commercial_use,
-                dim=entry.dim,
-                present=(settings.models_dir / entry.file).is_file(),
-                active=(
-                    entry.id == settings.detector_model
-                    if entry.kind == "detector"
-                    else entry.id == settings.embedder_model
-                ),
-            )
-            for entry in lock.models
-        ],
+        models=[_model_out(entry, settings, lock) for entry in lock.models],
         pending_job=_pending_job(conn, _PENDING_JOB_KINDS),
+    )
+
+
+def _model_out(entry: ModelEntry, settings: Settings, lock: ModelsLock) -> ConfigModelOut:
+    reason = runtime_config.blocked_reason(
+        lock, entry.id, kind=entry.kind, settings=settings
+    )
+    return ConfigModelOut(
+        id=entry.id,
+        name=entry.name,
+        version=entry.version,
+        kind=entry.kind,
+        license=entry.license,
+        commercial_use=entry.commercial_use,
+        dim=entry.dim,
+        present=(settings.models_dir / entry.file).is_file(),
+        active=(
+            entry.id == settings.detector_model
+            if entry.kind == "detector"
+            else entry.id == settings.embedder_model
+        ),
+        selectable=reason is None,
+        blocked_reason=reason,
     )

@@ -25,7 +25,10 @@ section 12 applies in full, and investigative use raises that bar rather than lo
 6. Every write path appends to the audit log. The log is append-only and hash-chained.
 7. Hash every ingested file (SHA-256) before processing.
 8. Verify model files against `models.lock` at start. Refuse to start on mismatch.
-9. Load non-commercial models only when `ALLOW_NONCOMMERCIAL_MODELS=true`.
+9. Load non-commercial models only when `allow_noncommercial_models` is true. It ships false
+   and is an audited operator decision (`PATCH /api/config`, reason required to enable), not
+   an env-only flag. The license stays visible whether it is on or off. `models.lock`
+   verification (invariant 8) is unaffected: that is integrity, not licensing.
 10. No age, gender, emotion, or attribute models. Do not load them from the buffalo_l pack.
 11. Bind the server to `127.0.0.1` only.
 12. Every match stores `best_template_id` and `threshold_set_id`.

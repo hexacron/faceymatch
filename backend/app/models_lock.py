@@ -5,7 +5,9 @@ Rules enforced here:
 - An ONNX file in models/ that is not listed is a refusal, not a warning: unlisted weights
   are exactly what invariant 8 exists to catch.
 - A model whose license is not cleared for commercial use loads only when
-  ALLOW_NONCOMMERCIAL_MODELS=true.
+  `allow_noncommercial_models` is set. That setting starts false and is an audited operator
+  decision (`PATCH /api/config`), not a deployment-time constant: the licence is recorded
+  and surfaced either way, and the record of who accepted it is the point.
 """
 
 from __future__ import annotations
@@ -60,7 +62,7 @@ class ModelsLockError(RuntimeError):
 
 
 class ModelLicenseError(RuntimeError):
-    """A non-commercial model was requested without ALLOW_NONCOMMERCIAL_MODELS."""
+    """A non-commercial model was requested while `allow_noncommercial_models` is false."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,14 +120,18 @@ def verify(models_dir: Path, lock: ModelsLock | None = None) -> ModelsLock:
 
 
 def assert_loadable(lock: ModelsLock, model_id: str, settings: Settings) -> ModelEntry:
-    """Gate a model load on its license (invariant 9, C7)."""
+    """Gate a model load on its license (invariant 9, C7).
+
+    The flag is an audited runtime setting, so this reads the *effective* settings the
+    caller resolved rather than the process environment.
+    """
     entry = lock.by_id(model_id)
     if entry is None:
         raise ModelsLockError(f"model {model_id!r} is not listed in models.lock")
     if not entry.commercial_use and not settings.allow_noncommercial_models:
         raise ModelLicenseError(
             f"model {model_id!r} is licensed {entry.license!r} (non-commercial); "
-            "set ALLOW_NONCOMMERCIAL_MODELS=true to load it"
+            "turn on allow_noncommercial_models to load it (PATCH /api/config, audited)"
         )
     return entry
 

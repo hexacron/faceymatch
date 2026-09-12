@@ -80,12 +80,35 @@ def api(provisioned: Settings) -> Iterator[TestClient]:
         yield client
 
 
+ENABLE_REASON = "operator accepts the InsightFace research licence for this install"
+
+
 @pytest.fixture
-def permissive(provisioned: Settings) -> Iterator[TestClient]:
-    """The same install with the C7 licence flag set in the environment (invariant 9)."""
-    settings = provisioned.model_copy(update={"allow_noncommercial_models": True})
-    with TestClient(create_app(settings)) as client:
-        yield client
+def permissive(api: TestClient) -> TestClient:
+    """The same install with the licence gate turned on the way an operator turns it on."""
+    enabled = api.patch(
+        "/api/config",
+        json={
+            "changes": {"allow_noncommercial_models": True},
+            "reason": ENABLE_REASON,
+        },
+    )
+    assert enabled.status_code == 200, enabled.text
+    return api
+
+
+def _settle_jobs(settings: Settings) -> None:
+    """Mark queued jobs done, so the next PATCH reaches the check under test.
+
+    No worker runs in these tests; a queued reembed would otherwise trip the "a job is in
+    flight" 409 before anything else is evaluated.
+    """
+    conn = connect(settings.db_path)
+    try:
+        with transaction(conn):
+            conn.execute("UPDATE jobs SET status = 'done' WHERE status IN ('queued','running')")
+    finally:
+        conn.close()
 
 
 def db(settings: Settings) -> sqlite3.Connection:
@@ -102,7 +125,9 @@ def test_config_reports_the_whole_operating_state(api: TestClient) -> None:
 
     assert body["editable"]["embedder_model"] == SFACE
     assert body["editable"]["person_score_mode"] == "max"
-    assert body["readonly"]["allow_noncommercial_models"] is False
+    # The licence gate is the operator's to set, so it lives with the editable keys.
+    assert body["editable"]["allow_noncommercial_models"] is False
+    assert "allow_noncommercial_models" not in body["readonly"]
     assert body["readonly"]["execution_provider"] == "CPUExecutionProvider"
     assert body["pending_job"] is None
 
@@ -112,6 +137,60 @@ def test_config_reports_the_whole_operating_state(api: TestClient) -> None:
     assert models[BUFFALO]["commercial_use"] is False
     assert models[BUFFALO]["dim"] == 512
     assert all(item["present"] for item in models.values())
+
+
+def test_the_model_list_says_why_a_model_cannot_be_picked(
+    api: TestClient, provisioned: Settings
+) -> None:
+    """A picker built from this list must never offer something the PATCH would refuse."""
+    models = {item["id"]: item for item in api.get("/api/config").json()["models"]}
+    assert models[SFACE]["selectable"] is True
+    assert models[SFACE]["blocked_reason"] is None
+    # Licence, and the reason names it, so the UI can tell this from a block a flag
+    # cannot fix.
+    assert models[BUFFALO]["selectable"] is False
+    assert "non-commercial" in models[BUFFALO]["blocked_reason"]
+
+    # And the reason really is what the endpoint enforces.
+    refused = api.patch(
+        "/api/config", json={"changes": {"embedder_model": BUFFALO}, "reason": "x"}
+    )
+    assert refused.status_code == 422
+    assert refused.json()["detail"] == models[BUFFALO]["blocked_reason"]
+
+    # A block the licence flag cannot lift reads differently.
+    (provisioned.models_dir / "w600k_r50.onnx").unlink()
+    absent = {item["id"]: item for item in api.get("/api/config").json()["models"]}[BUFFALO]
+    assert absent["selectable"] is False
+    assert "not present" in absent["blocked_reason"]
+
+
+def test_the_active_model_is_not_exempt_from_the_licence_report(
+    permissive: TestClient, provisioned: Settings
+) -> None:
+    """A non-commercial model left running with the gate off must not look fine."""
+    permissive.patch(
+        "/api/config", json={"changes": {"embedder_model": BUFFALO}, "reason": "eval"}
+    )
+    # Clear the flag behind the API's back, the way a hand-edited row or a rolled-back
+    # .env would: the endpoint refuses this, but the state has to stay legible if it happens.
+    conn = db(provisioned)
+    try:
+        with transaction(conn):
+            conn.execute("DELETE FROM runtime_config WHERE key = 'allow_noncommercial_models'")
+    finally:
+        conn.close()
+
+    active = {item["id"]: item for item in permissive.get("/api/config").json()["models"]}[
+        BUFFALO
+    ]
+    assert active["active"] is True
+    assert active["selectable"] is False
+    assert "non-commercial" in active["blocked_reason"]
+    # healthz agrees: nothing can auto-accept with an embedder that will not load.
+    auto_accept = permissive.get("/api/healthz").json()["auto_accept"]
+    assert auto_accept["allowed"] is False
+    assert "non-commercial" in auto_accept["reason"]
 
 
 def test_a_change_is_audited_with_its_previous_and_new_value(
@@ -164,7 +243,6 @@ def test_an_unchanged_value_is_not_audited_as_a_change(api: TestClient) -> None:
     "changes",
     [
         pytest.param({"t_strong": 0.9}, id="thresholds are calibration output, not config"),
-        pytest.param({"allow_noncommercial_models": True}, id="licence gate is env-only"),
         pytest.param({"execution_provider": "CoreMLExecutionProvider"}, id="ep is env-only"),
         pytest.param({"db_path": "elsewhere.db"}, id="the install owns where evidence lives"),
         pytest.param({"nonsense": 1}, id="unknown key"),
@@ -196,29 +274,119 @@ def test_an_out_of_range_value_is_refused(api: TestClient, changes: dict[str, An
     assert audit_entries(api, "config.change") == []
 
 
-def test_a_noncommercial_model_is_refused_unless_the_environment_allows_it(
+def test_a_noncommercial_model_is_refused_until_the_operator_accepts_the_licence(
     api: TestClient,
 ) -> None:
-    """Invariant 9, C7: a licensing gate the UI can flip is not a gate."""
-    response = api.patch(
+    """Invariant 9 as amended: the gate is an operator decision, and the decision is recorded."""
+    refused = api.patch(
         "/api/config", json={"changes": {"embedder_model": BUFFALO}, "reason": "eval"}
     )
-
-    assert response.status_code == 422
-    assert "non-commercial" in response.json()["detail"]
+    assert refused.status_code == 422
+    assert "non-commercial" in refused.json()["detail"]
     assert api.get("/api/config").json()["editable"]["embedder_model"] == SFACE
+
+    accepted = api.patch(
+        "/api/config",
+        json={"changes": {"allow_noncommercial_models": True}, "reason": ENABLE_REASON},
+    )
+    assert accepted.status_code == 200
+    assert accepted.json()["editable"]["allow_noncommercial_models"] is True
+    # No restart, no file edit: the same request now succeeds.
+    switched = api.patch(
+        "/api/config", json={"changes": {"embedder_model": BUFFALO}, "reason": "eval"}
+    )
+    assert switched.status_code == 200
+
+    flag_entry = next(
+        entry
+        for entry in audit_entries(api, "config.change")
+        if entry["payload"]["key"] == "allow_noncommercial_models"
+    )
+    assert flag_entry["payload"]["previous"] is False
+    assert flag_entry["payload"]["new"] is True
+    assert flag_entry["payload"]["reason"] == ENABLE_REASON
+
+
+def test_turning_the_licence_gate_on_needs_a_reason(api: TestClient) -> None:
+    """The reason is the only record of why this install may run the model at all."""
+    for reason in (None, "   "):
+        response = api.patch(
+            "/api/config",
+            json={"changes": {"allow_noncommercial_models": True}, "reason": reason},
+        )
+        assert response.status_code == 422
+        assert "needs a reason" in response.json()["detail"]
+    assert api.get("/api/config").json()["editable"]["allow_noncommercial_models"] is False
     assert audit_entries(api, "config.change") == []
 
 
-def test_the_same_switch_is_allowed_when_the_environment_permits_it(
-    permissive: TestClient,
-) -> None:
-    response = permissive.patch(
-        "/api/config", json={"changes": {"embedder_model": BUFFALO}, "reason": "eval"}
+def test_one_request_can_accept_the_licence_and_pick_the_model(api: TestClient) -> None:
+    """Validation is against the request, not the stored state; two round trips would be theatre."""
+    response = api.patch(
+        "/api/config",
+        json={
+            "changes": {"allow_noncommercial_models": True, "embedder_model": BUFFALO},
+            "reason": ENABLE_REASON,
+        },
     )
 
-    assert response.status_code == 200
-    assert response.json()["editable"]["embedder_model"] == BUFFALO
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["editable"]["embedder_model"] == BUFFALO
+    assert body["editable"]["allow_noncommercial_models"] is True
+    assert len(body["jobs_enqueued"]) == 2
+    assert {entry["payload"]["key"] for entry in audit_entries(api, "config.change")} == {
+        "allow_noncommercial_models",
+        "embedder_model",
+    }
+
+
+def test_the_gate_cannot_be_closed_under_the_model_it_is_holding_open(
+    permissive: TestClient, provisioned: Settings
+) -> None:
+    """Refused, not silently fixed: forcing the embedder back would re-embed off a checkbox."""
+    permissive.patch(
+        "/api/config", json={"changes": {"embedder_model": BUFFALO}, "reason": "eval"}
+    )
+    _settle_jobs(provisioned)
+
+    refused = permissive.patch(
+        "/api/config",
+        json={"changes": {"allow_noncommercial_models": False}, "reason": "licence lapsed"},
+    )
+
+    assert refused.status_code == 409
+    detail = refused.json()["detail"]
+    assert BUFFALO in detail
+    assert "embedder_model" in detail  # the remedy names the key to send alongside
+    body = permissive.get("/api/config").json()["editable"]
+    assert body["allow_noncommercial_models"] is True
+    assert body["embedder_model"] == BUFFALO
+
+
+def test_the_gate_closes_when_the_same_request_moves_off_the_model(
+    permissive: TestClient, provisioned: Settings
+) -> None:
+    """The remedy the refusal names has to actually work, in one request."""
+    permissive.patch(
+        "/api/config", json={"changes": {"embedder_model": BUFFALO}, "reason": "eval"}
+    )
+    _settle_jobs(provisioned)
+
+    response = permissive.patch(
+        "/api/config",
+        json={
+            "changes": {"allow_noncommercial_models": False, "embedder_model": SFACE},
+            "reason": "back to the shipped licence",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["editable"]["allow_noncommercial_models"] is False
+    assert body["editable"]["embedder_model"] == SFACE
+    # It went through the ordinary embedder-change consequences, not a silent revert.
+    assert len(body["jobs_enqueued"]) == 2
 
 
 def test_a_model_absent_from_models_lock_is_refused(api: TestClient) -> None:
@@ -416,18 +584,31 @@ def test_changing_the_detector_does_not_touch_stored_detections(
         conn.close()
 
 
-def test_a_switch_survives_a_restart(provisioned: Settings) -> None:
-    """The override is durable: a new process must not silently revert to the .env model."""
-    settings = provisioned.model_copy(update={"allow_noncommercial_models": True})
-    with TestClient(create_app(settings)) as first:
-        first.patch(
-            "/api/config", json={"changes": {"embedder_model": BUFFALO}, "reason": "eval"}
+def test_the_licence_decision_and_the_switch_both_survive_a_restart(
+    provisioned: Settings,
+) -> None:
+    """The overrides are durable: a new process must not revert to the environment."""
+    with TestClient(create_app(provisioned)) as first:
+        accepted = first.patch(
+            "/api/config",
+            json={
+                "changes": {"allow_noncommercial_models": True, "embedder_model": BUFFALO},
+                "reason": ENABLE_REASON,
+            },
         )
+        assert accepted.status_code == 200, accepted.text
 
-    with TestClient(create_app(settings)) as second:
+    # `provisioned` still has allow_noncommercial_models = False in the environment.
+    with TestClient(create_app(provisioned)) as second:
         body = second.get("/api/config").json()
         assert body["editable"]["embedder_model"] == BUFFALO
+        assert body["editable"]["allow_noncommercial_models"] is True
         assert {item["id"] for item in body["models"] if item["active"]} == {
             BUFFALO,
+            DETECTOR,
+        }
+        assert {item["id"] for item in body["models"] if item["selectable"]} == {
+            BUFFALO,
+            SFACE,
             DETECTOR,
         }

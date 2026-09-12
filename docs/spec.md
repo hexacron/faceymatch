@@ -19,7 +19,7 @@ Changes from 0.4:
 Changes from 0.3:
 
 - D4, D6 through D13 closed. AGENTS.md already hard-codes them as the stack.
-- Default embedder is SFace (MIT). buffalo_l is opt-in behind `ALLOW_NONCOMMERCIAL_MODELS=true`, so a fresh clone starts in a permissively licensed state.
+- Default embedder is SFace (MIT). buffalo_l is opt-in behind `allow_noncommercial_models`, which starts false, so a fresh clone starts in a permissively licensed state. Since 0.6 that setting is an audited operator decision rather than a deployment-time env flag (C7, 6.3).
 - The `insightface` Python package must never be imported at runtime: its model loader fetches weights over the network, breaking C1. Adapters load raw `.onnx` files through onnxruntime.
 - New table `detection_embeddings`. 6.2 stores an embedding per quality-passing crop, so enrollment from a stored detection and re-embed on model switch both read from it.
 - `matches` gains `embedder_model_id`. `threshold_sets` gains `gallery_size` and `execution_provider`. `models` gains `kind`. `persons` gains `status`. New `schema_migrations`.
@@ -87,7 +87,7 @@ Out of scope for v1:
 - C4. Defensible by default. Every match records how it was accepted (auto or operator), with model and threshold versions.
 - C5. Auto-acceptance needs an active, calibrated threshold set. Without one, all matches stay candidates.
 - C6. Only operator actions create templates.
-- C7. Non-commercial models load only when `ALLOW_NONCOMMERCIAL_MODELS=true`. The UI and every export state the active model license.
+- C7. Non-commercial models load only when `allow_noncommercial_models` is true. It ships false and is an audited operator decision through `PATCH /api/config`, not an environment-only constant: the operator who owns the installation is the one entitled to accept a licence, and making them edit a file and restart made the decision less visible rather than more considered. Enabling it requires a reason and appends `config.change` with the previous value, the new value, the actor and that reason. The UI and every export state the active model license.
 
 ## 4. Architecture
 
@@ -116,7 +116,7 @@ Out of scope for v1:
 | ID | Decision | Choice | Status | Reason |
 |----|----------|--------|--------|--------|
 | D1 | Input | Collected images and video files, plus screen acquisition on the operator workstation (D18) | Closed | No camera or sensor capture. The screen is not a new collection channel: the operator is already looking at those pixels. |
-| D2 | Recognition model | SFace (MIT) is the shipped default. buffalo_l (w600k_r50, 512-d) is opt-in behind `ALLOW_NONCOMMERCIAL_MODELS=true`, lab prototype only | Closed | A fresh clone starts permissively licensed. License or swap buffalo_l before product or case use (C7). |
+| D2 | Recognition model | SFace (MIT) is the shipped default. buffalo_l (w600k_r50, 512-d) is opt-in behind `allow_noncommercial_models`, lab prototype only | Closed | A fresh clone starts permissively licensed. License or swap buffalo_l before product or case use (C7). Making the flag operator-settable (C7, 0.6) changed who records the decision and when; it did not change what the InsightFace licence permits, and this row is a statement about the licence. |
 | D3 | Gallery scope | One global gallery across all cases | Closed | A person enrolled once is found in all media. |
 | D4 | Detector | YuNet (MIT). SCRFD-10GF adapter if licensed | Closed | Fast on CPU, 5 landmarks, permissive. |
 | D5 | Where detection runs | Backend only | Closed | One code path, and the browser never runs a model. Screen frames are posted to the backend like any other pixels (6.10). |
@@ -195,9 +195,9 @@ Rules:
 - Store `model_id` with every embedding, template, and match.
 - A model switch re-embeds templates and tracks. Provide a CLI job.
 - Verify each model file SHA-256 against `models.lock` at start. Refuse to start on mismatch.
-- `models.lock` records the license of each file. Refuse to load a non-commercial model unless `ALLOW_NONCOMMERCIAL_MODELS=true` (C7).
-- CI runs the full test suite with SFace, so the swap from buffalo_l stays a config change.
-- SFace is the shipped default embedder. buffalo_l loads only when `ALLOW_NONCOMMERCIAL_MODELS=true`, so a fresh clone starts in a permissively licensed state.
+- `models.lock` records the license of each file. Refuse to load a non-commercial model unless `allow_noncommercial_models` is true (C7). That setting is an audited operator decision, not an environment-only flag: turning it on requires a reason and is recorded in the audit chain, and the license text stays visible in `GET /api/models`, `GET /api/config` and the C7 banner whether it is on or off. `models.lock` verification itself does not move (invariant 8) — unknown or SHA-mismatched weights are refused regardless of any setting, because that is integrity, not licensing.
+- Turning `allow_noncommercial_models` off while a non-commercial model is the active detector or embedder is refused (409), naming the active model and the remedy. Forcing the embedder back would re-embed the whole gallery as a side effect of a checkbox; one `PATCH` carrying both keys does it deliberately, with the ordinary model-switch consequences (6.2 re-embed, re-match, auto-accept off until recalibration).
+- SFace is the shipped default embedder. buffalo_l loads only once `allow_noncommercial_models` is turned on, so a fresh clone starts in a permissively licensed state.
 - Never import the `insightface` Python package at runtime. Its model loader fetches weights over the network, which breaks C1. Adapters load raw `.onnx` files from `models/` through onnxruntime directly.
 - Every match stores the `embedder_model_id` that produced its scores (`matches.embedder_model_id`).
 

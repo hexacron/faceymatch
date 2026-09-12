@@ -1,7 +1,8 @@
 """buffalo_l w600k_r50 embedder adapter (spec 6.3, C7).
 
-Non-commercial weights: loading is gated on ALLOW_NONCOMMERCIAL_MODELS (invariant 9), which
-`app.core.registry` enforces through `app.models_lock.assert_loadable`. Raw ONNX through
+Non-commercial weights: loading is gated on the `allow_noncommercial_models` setting
+(invariant 9), an audited operator decision that `app.core.registry` enforces through
+`app.models_lock.assert_loadable`. Raw ONNX through
 onnxruntime; the `insightface` package is never imported, since its loader fetches weights
 over the network and would break C1 (spec 6.3).
 
