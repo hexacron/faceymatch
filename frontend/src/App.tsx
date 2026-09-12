@@ -1,4 +1,5 @@
 import { IngestNotices } from "./components/IngestNotices";
+import ConfigView from "./views/ConfigView";
 import LiveView from "./views/LiveView";
 import MediaDetailView from "./views/MediaDetailView";
 import MediaLibraryView from "./views/MediaLibraryView";
@@ -17,6 +18,7 @@ const NAV_ITEMS: readonly NavItem[] = [
   { label: "Persons", route: { view: "persons" }, activeViews: ["persons", "person"] },
   { label: "Review", route: { view: "review" }, activeViews: ["review"] },
   { label: "Status", route: { view: "status" }, activeViews: ["status"] },
+  { label: "Config", route: { view: "config" }, activeViews: ["config"] },
 ];
 
 function CurrentView({ route }: { route: Route }) {
@@ -35,6 +37,8 @@ function CurrentView({ route }: { route: Route }) {
       return <ReviewView />;
     case "status":
       return <StatusView />;
+    case "config":
+      return <ConfigView />;
   }
 }
 

@@ -23,7 +23,8 @@ export type Route =
   | { view: "persons" }
   | { view: "person"; personId: string }
   | { view: "review" }
-  | { view: "live" };
+  | { view: "live" }
+  | { view: "config" };
 
 function parseFocus(raw: string | undefined): Rect | null {
   if (raw === undefined) {
@@ -68,6 +69,8 @@ export function parseRoute(hash: string): Route {
       return { view: "review" };
     case "live":
       return { view: "live" };
+    case "config":
+      return { view: "config" };
     default:
       return { view: "status" };
   }
@@ -98,6 +101,8 @@ export function hrefFor(route: Route): string {
       return "#/review";
     case "live":
       return "#/live";
+    case "config":
+      return "#/config";
   }
 }
 
