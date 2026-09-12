@@ -13,8 +13,8 @@ from app.core import storage
 from app.core.registry import ActiveModels
 from app.core.types import ARCFACE_TEMPLATE, Detection
 from app.db.conn import transaction
-from app.main import seed_default_threshold_set
 from app.pipeline.process import process_image
+from app.thresholds import seed_default_threshold_set
 from tests.conftest import seed_gallery
 
 
@@ -199,8 +199,10 @@ def test_default_threshold_is_audited_and_idempotent(conn: sqlite3.Connection) -
             ("a" * 64,),
         )
 
-    first = seed_default_threshold_set(conn, model_id="embedder", actor="tester")
-    second = seed_default_threshold_set(conn, model_id="embedder", actor="tester")
+    with transaction(conn):
+        first = seed_default_threshold_set(conn, model_id="embedder", actor="tester")
+    with transaction(conn):
+        second = seed_default_threshold_set(conn, model_id="embedder", actor="tester")
 
     assert first is not None
     assert second is None

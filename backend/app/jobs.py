@@ -47,6 +47,43 @@ def row_to_job(row: sqlite3.Row) -> Job:
     )
 
 
+def insert(
+    conn: sqlite3.Connection,
+    *,
+    kind: JobKind,
+    actor: str,
+    params: dict[str, Any] | None = None,
+    case_id: str | None = None,
+) -> str:
+    """Queue a job inside the caller's transaction. Returns the new job id.
+
+    Separate from `enqueue` so a caller that is already writing — a config change that has
+    to enqueue the re-embed it implies — commits the decision and the job it triggers
+    together. A switch recorded with no job to carry it out is a lie the audit log would
+    keep telling.
+    """
+    if kind not in JOB_KINDS:
+        raise ValueError(f"unknown job kind {kind!r}")
+    job_id = new_id()
+    now = audit.now_ts()
+    payload = params if params is not None else {}
+    conn.execute(
+        "INSERT INTO jobs (id, kind, status, params_json, progress, error, "
+        "created_at, updated_at) VALUES (?, ?, 'queued', ?, '{}', NULL, ?, ?)",
+        (job_id, kind, audit.canonical_json(payload).decode("utf-8"), now, now),
+    )
+    audit.append(
+        conn,
+        actor=actor,
+        action="job.enqueue",
+        object_type="job",
+        object_id=job_id,
+        case_id=case_id,
+        payload={"kind": kind, "params": payload},
+    )
+    return job_id
+
+
 def enqueue(
     conn: sqlite3.Connection,
     *,
@@ -55,26 +92,8 @@ def enqueue(
     params: dict[str, Any] | None = None,
     case_id: str | None = None,
 ) -> Job:
-    if kind not in JOB_KINDS:
-        raise ValueError(f"unknown job kind {kind!r}")
-    job_id = new_id()
-    now = audit.now_ts()
-    payload = params if params is not None else {}
     with transaction(conn):
-        conn.execute(
-            "INSERT INTO jobs (id, kind, status, params_json, progress, error, "
-            "created_at, updated_at) VALUES (?, ?, 'queued', ?, '{}', NULL, ?, ?)",
-            (job_id, kind, audit.canonical_json(payload).decode("utf-8"), now, now),
-        )
-        audit.append(
-            conn,
-            actor=actor,
-            action="job.enqueue",
-            object_type="job",
-            object_id=job_id,
-            case_id=case_id,
-            payload={"kind": kind, "params": payload},
-        )
+        job_id = insert(conn, kind=kind, actor=actor, params=params, case_id=case_id)
     job = get(conn, job_id)
     if job is None:  # pragma: no cover - the insert above just committed
         raise RuntimeError(f"job {job_id} vanished after insert")
@@ -114,12 +133,19 @@ def claim_next(conn: sqlite3.Connection, *, actor: str) -> Job | None:
     return get(conn, job_id)
 
 
-def set_progress(conn: sqlite3.Connection, job_id: str, progress: dict[str, Any]) -> None:
-    with transaction(conn):
-        conn.execute(
-            "UPDATE jobs SET progress = ?, updated_at = ? WHERE id = ?",
-            (audit.canonical_json(progress).decode("utf-8"), audit.now_ts(), job_id),
-        )
+def write_progress(
+    conn: sqlite3.Connection, job_id: str, progress: dict[str, Any]
+) -> None:
+    """Checkpoint a running job inside the caller's transaction (spec 6.2, "Job resume").
+
+    In the caller's transaction on purpose: the checkpoint has to land with the batch it
+    describes, or a resumed job restarts work it already committed, or skips work it did
+    not.
+    """
+    conn.execute(
+        "UPDATE jobs SET progress = ?, updated_at = ? WHERE id = ?",
+        (audit.canonical_json(progress).decode("utf-8"), audit.now_ts(), job_id),
+    )
 
 
 def finish(

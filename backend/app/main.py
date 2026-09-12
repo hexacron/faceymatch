@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app import audit, models_lock
+from app import audit, models_lock, runtime_config
 from app.api import audit as audit_router
 from app.api import capture as capture_router
 from app.api import cases as cases_router
@@ -34,7 +34,7 @@ from app.api import tracks as tracks_router
 from app.config import Settings, get_settings
 from app.db.conn import assert_extension_loading_available, connect, transaction
 from app.db.migrate import migrate
-from app.ids import new_id
+from app.thresholds import seed_default_threshold_set
 
 log = logging.getLogger("app.main")
 
@@ -94,48 +94,6 @@ def sync_models_table(conn: sqlite3.Connection, lock: models_lock.ModelsLock, ac
                 )
     return changed
 
-def seed_default_threshold_set(
-    conn: sqlite3.Connection, *, model_id: str, actor: str
-) -> str | None:
-    """Create the one safe, uncalibrated bootstrap set when this embedder has none."""
-    if conn.execute("SELECT 1 FROM models WHERE id = ?", (model_id,)).fetchone() is None:
-        return None
-    with transaction(conn):
-        existing = conn.execute(
-            "SELECT id FROM threshold_sets WHERE model_id = ? LIMIT 1", (model_id,)
-        ).fetchone()
-        if existing is not None:
-            return None
-        previous = conn.execute(
-            "SELECT id FROM threshold_sets WHERE active = 1"
-        ).fetchone()
-        threshold_set_id = new_id()
-        now = audit.now_ts()
-        conn.execute("UPDATE threshold_sets SET active = 0 WHERE active = 1")
-        conn.execute(
-            "INSERT INTO threshold_sets (id, model_id, t_strong, t_possible, margin, "
-            "calibrated, calibrated_at, eval_report_sha256, gallery_size, "
-            "execution_provider, active, created_at) "
-            "VALUES (?, ?, 0.55, 0.35, 0.05, 0, NULL, NULL, NULL, NULL, 1, ?)",
-            (threshold_set_id, model_id, now),
-        )
-        audit.append(
-            conn,
-            actor=actor,
-            action="threshold_set.seed",
-            object_type="threshold_set",
-            object_id=threshold_set_id,
-            payload={
-                "model_id": model_id,
-                "t_strong": 0.55,
-                "t_possible": 0.35,
-                "margin": 0.05,
-                "calibrated": False,
-                "previous_active_id": None if previous is None else str(previous["id"]),
-            },
-        )
-    return threshold_set_id
-
 
 def startup_checks(settings: Settings) -> models_lock.ModelsLock:
     settings.ensure_dirs()
@@ -156,9 +114,14 @@ def startup_checks(settings: Settings) -> models_lock.ModelsLock:
                     payload={"applied": [f"{m.version:04d}_{m.name}" for m in applied]},
                 )
         sync_models_table(conn, lock, settings.operator_name)
-        seed_default_threshold_set(
-            conn, model_id=settings.embedder_model, actor=settings.operator_name
-        )
+        # The effective embedder, not the environment's: a model switch through
+        # PATCH /api/config is durable, so a restart must bootstrap the model that is
+        # actually active rather than the one the .env still names.
+        effective = runtime_config.effective(conn, settings)
+        with transaction(conn):
+            seed_default_threshold_set(
+                conn, model_id=effective.embedder_model, actor=settings.operator_name
+            )
     finally:
         conn.close()
     return lock

@@ -51,6 +51,16 @@ _cache: dict[_CacheKey, ActiveModels] = {}
 _cache_lock = threading.Lock()
 
 
+def has_adapter(model_id: str, *, kind: str) -> bool:
+    """Whether this build can actually run that model id.
+
+    A model can be listed in models.lock, present on disk and correctly licensed and still
+    be unrunnable here, because no adapter implements it. Exposed so a configuration change
+    is refused by the request that made it rather than by the next job.
+    """
+    return model_id in (_DETECTOR_IDS if kind == "detector" else _EMBEDDER_CLASSES)
+
+
 @dataclass(frozen=True, slots=True)
 class ActiveModels:
     """The detector and embedder this process is running, plus their provenance."""

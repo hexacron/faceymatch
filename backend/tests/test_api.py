@@ -5,12 +5,14 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from app.config import Settings
+from app.db.migrate import discover
 
 
 def test_healthz_reports_schema_models_and_chain_head(client: TestClient) -> None:
     body = client.get("/api/healthz").json()
     assert body["status"] == "ok"
-    assert body["migration_version"] == 2
+    # The version the database is actually at, not a literal that every migration breaks.
+    assert body["migration_version"] == max(m.version for m in discover())
     assert body["embedder"]["model_id"] == "sface-2021dec"
     # No weights provisioned in a fresh install: C7 banner shows "not provisioned".
     assert body["embedder"]["present"] is False

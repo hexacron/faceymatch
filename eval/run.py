@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 
 import metrics
-from app import audit, models_lock
+from app import audit, models_lock, runtime_config
 from app.config import Settings
 from app.core.registry import get_active_models
 from app.db.conn import connect, transaction
@@ -249,6 +249,15 @@ def main() -> None:
     settings = Settings()
     if args.embedder_model:
         settings = settings.model_copy(update={"embedder_model": args.embedder_model})
+    else:
+        # No explicit model: calibrate whatever is actually running. After a switch through
+        # PATCH /api/config that is the durable override, not what .env still says, and a
+        # threshold set filed against the wrong model_id would never open the gate (C5).
+        conn = connect(settings.db_path)
+        try:
+            settings = runtime_config.effective(conn, settings)
+        finally:
+            conn.close()
     result = run(args.dataset, settings, args.output)
     print(json.dumps(result, sort_keys=True))
 

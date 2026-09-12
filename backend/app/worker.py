@@ -1,9 +1,13 @@
 """Single job worker process (D10).
 
-M0 registers one handler: `audit_verify`, which recomputes the hash chain and records the
-outcome both in `jobs.progress` and as an audit entry, so verification is itself auditable.
-Pipeline handlers (ingest, process, rematch, reembed, cluster, export) arrive with their
-milestones; an unregistered kind fails its job loudly rather than silently succeeding.
+Handlers registered: `audit_verify`, `process`, `rematch`. An unregistered kind fails its
+job loudly rather than silently succeeding.
+
+Every job runs against the *effective* settings — the environment overlaid with the
+durable overrides in `runtime_config` — read fresh from the database as the job is claimed.
+That is what makes `PATCH /api/config` take effect on the next job instead of the next
+restart, and it is why a config change is refused while a re-embed is in flight: the job
+that is half-committed must keep the parameters it started with.
 """
 
 from __future__ import annotations
@@ -16,7 +20,7 @@ from collections.abc import Callable
 from types import FrameType
 from typing import Any
 
-from app import audit, models_lock
+from app import audit, models_lock, runtime_config
 from app.config import Settings, get_settings
 from app.core.registry import get_active_models
 from app.db.conn import connect, transaction
@@ -89,7 +93,6 @@ def handle_rematch(
     ).as_progress()
 
 
-
 HANDLERS: dict[str, Handler] = {
     "audit_verify": handle_audit_verify,
     "process": handle_process,
@@ -105,10 +108,16 @@ def run_job(conn: sqlite3.Connection, job: Job, settings: Settings) -> dict[str,
 
 
 def run_once(conn: sqlite3.Connection, settings: Settings) -> Job | None:
-    """Claim and run at most one job. Returns the job it ran, or None if the queue was empty."""
+    """Claim and run at most one job. Returns the job it ran, or None if the queue was empty.
+
+    `settings` is the process's base configuration; the job runs against that overlaid with
+    the durable overrides, re-read here so a change made through `PATCH /api/config` is
+    picked up by the very next job without restarting the worker.
+    """
     job = claim_next(conn, actor=settings.operator_name)
     if job is None:
         return None
+    settings = runtime_config.effective(conn, settings)
     try:
         progress = run_job(conn, job, settings)
     except Exception as exc:
