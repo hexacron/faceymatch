@@ -1,8 +1,20 @@
 # Local Face Match System: Design Spec
 
-Version: 0.4
+Version: 0.5
 Owner: Brock
 Status: All core decisions closed. Proposed items can change during build.
+
+Changes from 0.4:
+
+- Intended use is investigations, not lab exercise. Section 12's requirements all stand and are tightened, not relaxed, by that: biometric material handled here is special-category data whatever its provenance.
+- New section 6.10: two tiers for screen material. `POST /api/capture` ingests screen pixels as evidence through the existing ingest; `POST /api/live/match` matches one frame and persists nothing (D18).
+- New invariant 13: no identity, identification or template may derive from transient pixels. Enrollment and tagging act only on a stored detection whose source media was hashed at ingest.
+- `media.ingest` payload records `acquisition` (`upload`, `folder_import`, `screen_capture`) and `capture_mode`. One `media.ingest` entry per media row still holds, whatever the source.
+- `GET /api/healthz` reports screen-capture capability so the UI can refuse before the operator is asked to select.
+- Quality gate step 4: sharpness is measured on the detection box resampled to the 112x112 embed size. `MIN_SHARPNESS` stays 40.0 but bounds a different quantity, so values in `detections.quality_json` from before the change are not comparable with values after it.
+- `PATCH /api/cases/{id}` corrects `authorization_basis`, audited as `case.amend_authorization` carrying the previous text, the new text and a reason (D19).
+- Out of scope reworded: the ban is on camera and sensor capture and on unattended monitoring, not on live input as such. Operator-initiated capture and match of the operator's own display are in scope.
+- D1 and D5 reworded to match: input includes screen acquisition; detection is still backend only.
 
 Changes from 0.3:
 
@@ -48,6 +60,7 @@ The system finds face matches in collected images and video. It runs fully local
 In scope:
 
 - Ingest of images and video files.
+- Screen acquisition on the operator workstation: capture what is on screen in another application as evidence, and match a screen frame without storing it (6.10).
 - Face detection, tracking, and embedding on the backend.
 - Enrollment of people from images or from detected faces.
 - 1:N matching with open-set "unknown" results.
@@ -60,7 +73,8 @@ In scope:
 
 Out of scope for v1:
 
-- Webcam or live stream input.
+- Camera and sensor capture: webcams, phone cameras, capture cards, RTSP and other network streams. No video capture device is ever a source.
+- Unattended or continuous monitoring, and alerting. No always-on watcher, and no matching of a stream the operator is not actively looking at. Operator-initiated screen capture and operator-initiated live match of the operator's own display are in scope (6.10): each is one explicit action on pixels already on that operator's screen.
 - Age, gender, emotion, or any attribute estimation. Do not ship these models.
 - Face search against the open web or third-party services.
 - Mobile clients. Multi-site sync.
@@ -101,11 +115,11 @@ Out of scope for v1:
 
 | ID | Decision | Choice | Status | Reason |
 |----|----------|--------|--------|--------|
-| D1 | Input | Collected images and video only | Closed | No webcam need. |
+| D1 | Input | Collected images and video files, plus screen acquisition on the operator workstation (D18) | Closed | No camera or sensor capture. The screen is not a new collection channel: the operator is already looking at those pixels. |
 | D2 | Recognition model | SFace (MIT) is the shipped default. buffalo_l (w600k_r50, 512-d) is opt-in behind `ALLOW_NONCOMMERCIAL_MODELS=true`, lab prototype only | Closed | A fresh clone starts permissively licensed. License or swap buffalo_l before product or case use (C7). |
 | D3 | Gallery scope | One global gallery across all cases | Closed | A person enrolled once is found in all media. |
 | D4 | Detector | YuNet (MIT). SCRFD-10GF adapter if licensed | Closed | Fast on CPU, 5 landmarks, permissive. |
-| D5 | Where detection runs | Backend only | Closed | No live input. One code path. |
+| D5 | Where detection runs | Backend only | Closed | One code path, and the browser never runs a model. Screen frames are posted to the backend like any other pixels (6.10). |
 | D6 | Tracker | ByteTrack-lite in Python | Closed | Simple, robust to blur, no extra deps. |
 | D7 | Frontend | React + Vite + TypeScript, static build | Closed | Backend serves the build. No Node runtime in production. |
 | D8 | Backend | Python 3.12, FastAPI, Uvicorn, Pydantic v2, onnxruntime | Closed | Matches existing FastAPI work. CoreML EP on Mac. |
@@ -118,6 +132,8 @@ Out of scope for v1:
 | D15 | Operator model | Single operator per install, named in audit log | Proposed | Revisit for shared instances. |
 | D16 | Identity acceptance | Auto-accept `strong` band. Operator may override any result | Closed | No mandatory human review. |
 | D17 | Template creation | Operator action only | Closed | Stops gallery drift from wrong auto-matches. |
+| D18 | Screen as a source | Two tiers: `POST /api/capture` ingests screen pixels as evidence; `POST /api/live/match` matches a frame and persists nothing. No identity or template may derive from transient pixels (6.10, invariant 13) | Closed | The operator's material is often already on screen in another application. One path had to be either fully audited evidence or fully transient; a middle path would put an un-auditable image behind a biometric claim. Matching at browse speed needs no writes, and enrolling needs a hashed file, so the split follows the requirement rather than the transport. |
+| D19 | Authorization basis | Correctable through `PATCH /api/cases/{id}`, audited as `case.amend_authorization` with the previous text, the new text and a reason | Closed | Section 12 makes the basis the record justifying biometric processing. An uncorrectable field goes stale and stops describing the data; a silently overwritten one destroys the record of what processing was justified under. Both are worse than an audited amendment. |
 
 ## 6. Components
 
@@ -139,7 +155,7 @@ Per file:
 4. Quality gate per detection:
    - Width >= `MIN_EMBED_PX` (start 80, tune in eval).
    - Yaw from landmark symmetry below `MAX_YAW`.
-   - Laplacian variance above `MIN_SHARPNESS`.
+   - Laplacian variance above `MIN_SHARPNESS`, measured on the detection box resampled to the 112x112 embed size, not on native pixels. Laplacian variance tracks sampling density as well as focus, so on native pixels the same face scores an order of magnitude lower when it arrives as an interpolated upscale, which is what a screen capture of a photo on a high-DPI display is. Judging the pixels at the size the embedder consumes makes the criterion a focus test at any rendering scale, and is why `MIN_SHARPNESS` is one number rather than a function of face size.
    - Detector score above `MIN_DET_SCORE`.
 5. Align passing crops to the 112x112 ArcFace 5-point template. Write the aligned crop of every quality-passing detection to the content-addressed store and record its SHA-256 in `detections.crop_sha256`.
 6. Embed every stored crop and write one row per crop to `detection_embeddings`. Store the L2-normalized mean of the best K crops per track (default K = 5) in `tracks.embedding_mean`. Keeping every crop and its embedding is what lets a model switch re-embed without re-decoding media.
@@ -149,6 +165,8 @@ Per file:
 10. Write results. Emit progress events.
 
 Still images: one track per detection, `start_ms = end_ms = 0`. Step 3 is skipped; steps 7 to 10 are identical to video, so there is one `tracks`/`identities` code path.
+
+Measurement domain change: `MIN_SHARPNESS` stays 40.0, but the quantity it bounds changed with the step 4 wording above. Sharpness values recorded in `detections.quality_json` before that change are in the old native-pixel domain and are not comparable with values recorded after it. Both remain a faithful record of the decision made at the time; anything that compares them across the boundary is comparing different units.
 
 Job resume: after each committed batch the worker writes a structured checkpoint into `jobs.progress` (last decoded `frame_idx`, last `t_ms`, per-stage counts). Resume reads that checkpoint rather than scanning for the last written row. Detection writes are idempotent on `(media_id, frame_idx)` under a unique index, so a job resumed inside the batch it died in cannot double-insert.
 
@@ -262,6 +280,20 @@ Other views:
 - Cross-case edges are allowed. Each edge lists the cases its proof comes from.
 - Exports: GraphML, CSV, Maltego import. The Maltego format is open (section 15).
 
+### 6.10 Screen acquisition and live match
+
+The operator's source is often a face already on screen in another application: a photo in a browser, a paused video, Preview. Two tiers serve that. The split between them is a privacy boundary, not an implementation convenience.
+
+Tier 1, evidence. `POST /api/capture` (macOS only) captures the screen with the local `screencapture` binary into a temp file and hands those bytes to the same ingest as `POST /api/media`: hash first (invariant 7), content-addressed store, one `media` row in the case, one `process` job, one `media.ingest` audit entry. The payload records `acquisition` (`upload`, `folder_import` or `screen_capture`) and, for a capture, the selection `capture_mode` (`region`, `window`, `screen`). One action per media row, whatever the source. The temp file is deleted after ingest and the clipboard is never used, so the operator's pasteboard is never disturbed. `GET /api/healthz` reports `capture: {available, platform_supported, binary_present, reason}` so the UI refuses before asking the operator to select. Wrong platform, missing binary, denied Screen Recording permission and a blank frame all fail closed with a reason; a cancelled selection writes nothing.
+
+Tier 2, live match. `POST /api/live/match` takes one frame and runs detect, quality gate, align, embed, gallery match and band assignment through the same `Detector`, `Embedder`, active threshold set and band rules as 6.2 and 6.4. It persists nothing: no `media`, `detections`, `detection_embeddings`, `tracks`, `matches`, `identities`, `identifications` or `templates` row, no stored crop, no per-frame audit entry. It is a read-only query against the gallery, safe to call repeatedly while the operator browses. The answer is advisory. The auto-accept gate is reported so the UI can say why nothing self-confirms, but no live face is ever accepted: auto-acceptance is a property of stored matches (invariant 4, D16).
+
+Because tier 2 stores nothing, nothing in a live frame can be tagged or enrolled (invariant 13). Acting on a face the operator sees requires tier 1 first: capture it as evidence, then decide on the resulting detection.
+
+The tier 2 gallery loads once per `embedder_model_id` as one `(templates, dim)` matrix, cached and keyed on the audit chain head hash. Invariant 6 makes that head a total version counter for the database, so a cached matrix cannot outlive a template, person-status or embedding change, and the freshness check costs one indexed read per frame instead of a gallery reload.
+
+Measured on an M5 with CoreML, 1080p frames: 9 ms with no face, 24 ms with one, 40 ms with three. Embedding dominates at about 12 ms per quality-passing face, because the SFace graph has a fixed batch of 1. Loopback HTTP adds 1 to 3 ms. The response carries per-stage timings so the client sets its own sampling interval from measurement; one request in flight, frames dropped rather than queued.
+
 ## 7. Data model
 
 One DB for all cases. IDs are UUIDv7. Persons and templates are global. Media and all rows derived from media carry a case.
@@ -333,9 +365,16 @@ audit_log(seq, ts, actor, case_id, action, object_type, object_id,
 ```
 POST   /api/cases
 GET    /api/cases/{case_id}
+PATCH  /api/cases/{case_id}            {authorization_basis, reason?} -> CaseOut
+                                       audited correction, keeps the old text (section 12)
 
 POST   /api/media                      multipart upload -> {media_id, sha256, job_id}
 POST   /api/media/import               {folder_path} -> {job_ids[]}
+POST   /api/capture                    {case_id, mode, source_url} ->
+                                       {media_id, sha256, job_id, reused}
+                                       macOS screen capture, ingested as evidence (6.10)
+POST   /api/live/match                 multipart frame + optional case_id -> boxes and
+                                       ranked candidates. Advisory, persists nothing (6.10)
 GET    /api/media?status=
 GET    /api/media/{id}
 GET    /api/media/{id}/file            range requests for video
@@ -372,7 +411,8 @@ GET    /api/export?case_id=&format=bundle|graphml|csv|maltego
 DELETE /api/cases/{id}                purge case (section 12)
 DELETE /api/persons/{id}              purge person across all cases
 GET    /api/audit?from_seq=
-GET    /api/healthz                    db, models.lock, active threshold set, execution provider
+GET    /api/healthz                    db, models.lock, active threshold set, execution
+                                       provider, screen-capture capability
 ```
 
 ## 9. Evidence and audit
@@ -442,6 +482,8 @@ Targets, not measurements. Verify in M1 and M2.
 - Person purge removes the person, all templates, and all identities in every case.
 - The audit log keeps purge entries with hashes only.
 - `do_not_enroll` on a person blocks template creation and auto-acceptance for that person.
+- No identity, identification or template may derive from transient pixels (invariant 13). The live match path (6.10) stores nothing and therefore cannot enroll or tag. Enrollment and tagging act only on a stored detection whose source media was hashed and content-addressed at ingest, so a biometric claim stays re-checkable against the bytes it was made from.
+- `authorization_basis` is correctable and every correction is audited. `PATCH /api/cases/{id}` writes the new text and appends `case.amend_authorization` in the same transaction, carrying the previous text, the new text and the operator's reason. A basis that no longer describes the material is worse than no basis, and a silent overwrite would destroy the record of what processing was justified under. The correction is evidence too.
 - Biometric data is special-category data under GDPR Art. 9, and Canadian regulators have acted on facial recognition misuse. Automated identification without review raises the bar. Record `authorization_basis` on each case. Get legal review before any product use.
 
 ## 13. Repo layout
@@ -479,6 +521,7 @@ face-match/
 |---|-------------|-----------|
 | M0 | Repo, compose, FastAPI, static frontend, schema, audit chain, job worker | Audit chain verifies after 1000 writes |
 | M1 | Images: ingest, detect, enroll, match, auto-accept, overlay, tag, plus a minimal calibration run (about 10 identities) that writes an audited `threshold_set` with `calibrated = true` | Enroll 10 people, activate the calibrated set, auto-identify on new photos end to end, overrides logged |
+| M1.5 | Screen acquisition and live match (6.10): `POST /api/capture`, `POST /api/live/match`, capture capability in `GET /api/healthz` | Capture a face shown in another application, worker processes it, tracks appear; a live frame returns boxes and candidates while writing no row and no audit entry |
 | M2 | Video: decode, track, embed, match, player overlay | 30 min video processed, resumed after kill, boxes stay aligned on seek |
 | M3 | Clustering + cluster enrollment + re-match job | New person enrolled from cluster appears in all past media |
 | M4 | Graph + exports | Every edge opens its proof frames |
