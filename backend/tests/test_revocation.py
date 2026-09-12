@@ -348,6 +348,58 @@ def test_revoking_what_does_not_belong_to_the_person_is_a_404(
     assert _person(client, "dup")["template_count"] == 2
 
 
+def test_do_not_enroll_parks_a_person_without_touching_their_faces(
+    client: TestClient, conn: sqlite3.Connection, settings: Settings
+) -> None:
+    """Spec 12: parking a person and withdrawing their face are different acts."""
+    _seed(conn)
+
+    response = client.patch("/api/persons/dup", json={"do_not_enroll": True})
+
+    assert response.status_code == 200
+    assert response.json()["do_not_enroll"] is True
+    # Their templates are untouched: still active, still theirs, still enrolled.
+    assert response.json()["template_count"] == 2
+    assert response.json()["status"] == "enrolled"
+    assert _actions(conn, "template.revoke") == 0
+
+    # But they are out of the gallery, so nothing can be matched to them.
+    result = rematch(
+        conn,
+        settings,
+        embedder_model_id=_EMBEDDER,
+        execution_provider="CPUExecutionProvider",
+        actor="tester",
+    )
+    assert result.gallery_persons == 1
+    named = {
+        str(row["person_id"])
+        for row in conn.execute("SELECT person_id FROM matches").fetchall()
+    }
+    assert named == {"single"}
+
+    # And no new face may be added to them while parked.
+    refused = client.post("/api/persons/dup/templates", json={"detection_id": "det-b"})
+    assert refused.status_code == 409
+
+    # Unparking is the same setter, and restores them to the gallery.
+    assert client.patch("/api/persons/dup", json={"do_not_enroll": False}).json()[
+        "do_not_enroll"
+    ] is False
+    restored = rematch(
+        conn,
+        settings,
+        embedder_model_id=_EMBEDDER,
+        execution_provider="CPUExecutionProvider",
+        actor="tester",
+    )
+    assert restored.gallery_persons == 2
+
+
+def test_patching_an_unknown_person_is_a_404(client: TestClient) -> None:
+    assert client.patch("/api/persons/nobody", json={"do_not_enroll": True}).status_code == 404
+
+
 def test_a_revoke_queues_the_rematch_that_rescores_the_gallery(
     client: TestClient, conn: sqlite3.Connection
 ) -> None:

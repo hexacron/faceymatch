@@ -56,6 +56,10 @@ class TemplateRevoke(BaseModel):
     reason: str | None = Field(default=None, max_length=2000)
 
 
+class PersonUpdate(BaseModel):
+    do_not_enroll: bool
+
+
 class TemplateOut(BaseModel):
     id: str
     detection_id: str | None
@@ -303,6 +307,43 @@ def revoke_person_template(
     if row is None:  # pragma: no cover - the revoke above just committed
         raise HTTPException(status_code=500, detail="template read failed after revoke")
     return _template_out(row)
+
+
+@router.patch("/{person_id}", response_model=PersonOut)
+def update_person(
+    person_id: str, body: PersonUpdate, conn: ConnDep, settings: SettingsDep
+) -> PersonOut:
+    """Park or unpark a person (spec 12).
+
+    `do_not_enroll` keeps them out of the gallery and refuses new templates, and that is
+    all it does: the templates they already have stay exactly as they are. Withdrawing a
+    face is the separate, per-template revoke act above.
+    """
+    with transaction(conn):
+        current = conn.execute(
+            "SELECT do_not_enroll FROM persons WHERE id = ?", (person_id,)
+        ).fetchone()
+        if current is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="person not found"
+            )
+        conn.execute(
+            "UPDATE persons SET do_not_enroll = ? WHERE id = ?",
+            (int(body.do_not_enroll), person_id),
+        )
+        audit.append(
+            conn,
+            actor=settings.operator_name,
+            action="person.do_not_enroll",
+            object_type="person",
+            object_id=person_id,
+            payload={
+                "do_not_enroll": body.do_not_enroll,
+                "previous": bool(current["do_not_enroll"]),
+            },
+        )
+    row = conn.execute(_GET_PERSON, (person_id,)).fetchone()
+    return _person_out(row)
 
 
 def _person_out(row: sqlite3.Row) -> PersonOut:
