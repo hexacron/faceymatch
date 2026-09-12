@@ -113,6 +113,7 @@ export const NUMERIC_FIELDS: readonly NumericField[] = [
 export const FIELD_LABELS: Record<keyof ConfigEditable, string> = {
   detector_model: "Detector model",
   embedder_model: "Embedder model",
+  allow_noncommercial_models: "Non-commercial models",
   min_embed_px: "Minimum face width",
   max_yaw: "Maximum yaw",
   min_sharpness: "Minimum sharpness",
@@ -128,13 +129,18 @@ export const PERSON_SCORE_MODES: readonly { value: PersonScoreMode; label: strin
   { value: "mean_top3", label: "mean_top3 \u2014 mean of best 3" },
 ];
 
-/** Every editable setting as text, which is what the controls bind to. */
+/**
+ * Every editable setting as text, which is what the controls bind to. The
+ * license flag rides as "true"/"false" rather than splitting the draft into
+ * two shapes for one checkbox; {@link diffDraft} narrows it back.
+ */
 export type Draft = Record<keyof ConfigEditable, string>;
 
 export function draftFrom(editable: ConfigEditable): Draft {
   return {
     detector_model: editable.detector_model,
     embedder_model: editable.embedder_model,
+    allow_noncommercial_models: editable.allow_noncommercial_models ? "true" : "false",
     min_embed_px: String(editable.min_embed_px),
     max_yaw: String(editable.max_yaw),
     min_sharpness: String(editable.min_sharpness),
@@ -215,6 +221,18 @@ export function diffDraft(draft: Draft, current: ConfigEditable): Diff {
   const errors = draftErrors(draft);
   record(diff, "detector_model", current.detector_model, draft.detector_model);
   record(diff, "embedder_model", current.embedder_model, draft.embedder_model);
+  // Spelled out rather than "false → true": the summary is read as a sentence
+  // about what the install will do, and a bare boolean does not say it.
+  const allow = draft.allow_noncommercial_models === "true";
+  if (allow !== current.allow_noncommercial_models) {
+    diff.changes.allow_noncommercial_models = allow;
+    diff.list.push({
+      key: "allow_noncommercial_models",
+      label: FIELD_LABELS.allow_noncommercial_models,
+      from: current.allow_noncommercial_models ? "allowed" : "blocked",
+      to: allow ? "allowed" : "blocked",
+    });
+  }
   for (const field of NUMERIC_FIELDS) {
     if (errors[field.key] !== undefined) {
       continue;

@@ -568,12 +568,20 @@ export type ModelsInfo = {
 export type PersonScoreMode = "max" | "mean_top3";
 
 /**
- * The settings `PATCH /api/config` will take. Everything else in `Settings` is
+ * The settings `PATCH /api/config` takes. Everything else in `Settings` is
  * environment-only and arrives under `readonly`.
  */
 export type ConfigEditable = {
   detector_model: string;
   embedder_model: string;
+  /**
+   * Invariant 9's gate. It decides whether the backend will *load* a model
+   * whose license forbids commercial use; it says nothing about the license
+   * itself, which stays on the model and on every export (C7). Turning it on
+   * is audited and the backend requires a reason; turning it off while such a
+   * model is active is a 409.
+   */
+  allow_noncommercial_models: boolean;
   min_embed_px: number;
   max_yaw: number;
   min_sharpness: number;
@@ -586,7 +594,6 @@ export type ConfigEditable = {
 /** Facts about this deployment. Changing any of them means editing `.env` and restarting. */
 export type ConfigReadonly = {
   execution_provider: string;
-  allow_noncommercial_models: boolean;
   operator_name: string;
   db_path: string;
   models_dir: string;
@@ -598,9 +605,8 @@ export type ConfigReadonly = {
 
 /**
  * A model the operator may pick. Distinct from {@link ModelInfo}: this one
- * carries `commercial_use`, which with `allow_noncommercial_models` decides
- * whether the backend would load it at all (invariant 9, C7), and drops the
- * digest, which belongs on the license surface rather than on a picker.
+ * carries the selectability the backend itself computes, and drops the digest,
+ * which belongs on the license surface rather than on a picker.
  */
 export type ConfigModel = {
   id: string;
@@ -612,6 +618,19 @@ export type ConfigModel = {
   dim: number | null;
   present: boolean;
   active: boolean;
+  /**
+   * Whether a PATCH selecting this model for its kind would be accepted right
+   * now, against the *stored* `allow_noncommercial_models`. Computed from the
+   * same check the PATCH enforces, so the picker never offers a model the
+   * backend would refuse. Being active is no exemption.
+   */
+  selectable: boolean;
+  /**
+   * Non-null exactly when `selectable` is false. The license is checked last,
+   * so a license reason means the gate is the only obstacle and this
+   * submission can lift it; any other reason is one no setting will fix.
+   */
+  blocked_reason: string | null;
 };
 
 /**
