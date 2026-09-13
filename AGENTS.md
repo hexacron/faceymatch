@@ -7,7 +7,7 @@ section 12 applies in full, and investigative use raises that bar rather than lo
 ## How to work
 
 - Build one milestone at a time (spec section 14).
-- Done: M0, M1, M1.5 (screen acquisition and live match, spec 6.10). Next: M2 (video).
+- Done: M0, M1, M1.5 (screen acquisition and live match, spec 6.10), M2 (video: decode, track, match, player overlay). Next: M3 (clustering).
 - A milestone is done only when its exit test passes. Do not start the next one before that.
 - Plan first. List the files you will change. Then build.
 - If the spec is unclear or wrong, stop and ask. Do not guess. Do not change the spec without approval.

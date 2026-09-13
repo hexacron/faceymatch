@@ -62,6 +62,17 @@ class Settings(BaseSettings):
     min_sharpness: float = Field(default=40.0, ge=0.0)
     min_det_score: float = Field(default=0.6, ge=0.0, le=1.0)
     nms_iou: float = Field(default=0.3, ge=0.0, le=1.0)
+    # Tracking (spec 6.2 step 3). `min_det_score` is the detector's own floor, so a box
+    # between it and `track_high_score` is the "low score" of the two-pass association: it
+    # may continue a track through a blur or a half-occlusion, never start one.
+    track_high_score: float = Field(default=0.75, ge=0.0, le=1.0)
+    track_min_iou: float = Field(default=0.3, ge=0.0, le=1.0)
+    track_min_hits: int = Field(default=3, ge=1)
+    track_max_age_ms: int = Field(default=1000, ge=0)
+    # Sampled frames per committed batch and per checkpoint. At the default 3 fps that is
+    # ten seconds of video: small enough that a kill costs little, large enough that the
+    # embedder is handed a worthwhile stack and the chain is not appended to per frame.
+    video_batch_frames: int = Field(default=30, ge=1)
     embed_k: int = Field(default=5, ge=1)
     top_k: int = Field(default=3, ge=1)
     # Spec 6.4 offers mean-of-top-3 once a person has 5+ templates; max is the default

@@ -47,6 +47,16 @@ def relative_path_for(sha256: str) -> str:
     return f"{sha256[:2]}/{sha256[2:4]}/{sha256}"
 
 
+def resolve(root: Path, stored_path: str) -> Path:
+    """Where `media.path` actually is. Store-relative normally; legacy imports are absolute.
+
+    One reader for both the byte-serving path and the purge path: a file the API can serve
+    and a file the purge cannot find would be an object nobody deletes.
+    """
+    path = Path(stored_path)
+    return path if path.is_absolute() else root / path
+
+
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 

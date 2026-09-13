@@ -13,6 +13,9 @@ dependencies = [
     "numpy>=2.5.3",
     "pillow>=12.3.0",
     "pillow-heif>=1.7.0",
+    # Video decode (spec 6.2 step 1). PyAV bundles its own FFmpeg, so there is no system
+    # library to drift and nothing that reaches the network at runtime (C1).
+    "av>=13.1.0",
     "python-multipart>=0.0.20",
 ]
 

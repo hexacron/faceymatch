@@ -17,6 +17,8 @@ import numpy as np
 import pillow_heif
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+from app.pipeline import video
+
 # HEIC/HEIF is what iPhones produce, so it is a first-class input, not an extra.
 pillow_heif.register_heif_opener()  # type: ignore[attr-defined]
 
@@ -50,6 +52,24 @@ def require_supported_image(name: str | Path) -> str:
             f"expected one of {', '.join(sorted(SUPPORTED_IMAGE_SUFFIXES))}"
         )
     return suffix
+
+
+def media_kind(name: str | Path) -> str:
+    """`image` or `video` for a filename, or raise `UnsupportedImageError`.
+
+    Suffix, not content: ingest has to write `media.kind` before anything opens the bytes,
+    and probing an untrusted file to find out what it is would decode it on the upload path
+    — ahead of the hash that invariant 7 requires to come first.
+    """
+    suffix = Path(name).suffix.lower()
+    if suffix in SUPPORTED_IMAGE_SUFFIXES:
+        return "image"
+    if video.is_supported_video(name):
+        return "video"
+    raise UnsupportedImageError(
+        f"unsupported media type {suffix or '(none)'!r}; expected one of "
+        f"{', '.join(sorted(SUPPORTED_IMAGE_SUFFIXES | video.SUPPORTED_VIDEO_SUFFIXES))}"
+    )
 
 
 def decode_image(path: Path) -> np.ndarray:

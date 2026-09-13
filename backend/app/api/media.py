@@ -9,6 +9,7 @@ player in M2 does, and there is one reader for both kinds rather than two.
 
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
 import tempfile
@@ -17,23 +18,34 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import StreamingResponse
-from PIL import Image
+from fastapi.responses import Response, StreamingResponse
+from PIL import Image, ImageOps
 from pydantic import BaseModel, Field
 
 from app.api.deps import ConnDep, SettingsDep
 from app.config import Settings
 from app.core import storage
 from app.core.types import Band, IdentitySource, MediaKind, MediaStatus
-from app.jobs import JobStatus
-from app.pipeline import decode
+from app.jobs import JobStatus, enqueue
+from app.pipeline import decode, video
 from app.pipeline.capture import CaptureMode
-from app.pipeline.ingest import Acquisition, CaseNotFoundError, ingest_file, ingest_folder
+from app.pipeline.ingest import (
+    MEDIA_KIND_IMAGE,
+    Acquisition,
+    CaseNotFoundError,
+    ingest_file,
+    ingest_folder,
+)
+from app.purge import MediaNotFoundError, purge_media
 
 router = APIRouter(prefix="/api/media", tags=["media"])
 
 OCTET_STREAM = "application/octet-stream"
 _RANGE_UNIT = "bytes="
+
+# Wide enough to recognise a face in a grid tile on a Retina display, small enough that a
+# hundred of them are a few megabytes rather than a few hundred.
+THUMBNAIL_PX = 480
 
 # `_MEDIA_SELECT` only ever joins jobs whose params carry a `media_id`, and those are the
 # per-file pipeline kinds. A gallery-wide `rematch` has no media_id and never lands here.
@@ -89,6 +101,48 @@ class MediaImportOut(BaseModel):
     reused: int
 
 
+class MediaPurgeOut(BaseModel):
+    """What `DELETE /api/media/{id}` removed, in the shape the audit entry records it."""
+
+    media_id: str
+    detections: int
+    tracks: int
+    templates: int
+    identities: int
+    identifications: int
+    matches: int
+    persons_unenrolled: int
+    # False when the same bytes are still in another case: one object, many cases.
+    object_removed: bool
+    crops_removed: int
+    # Null exactly when the delete removed no template, so the gallery did not change.
+    rematch_job_id: str | None
+
+
+class MediaBulkDeleteIn(BaseModel):
+    # Capped because this is one request that destroys: a slip in a client that sends the
+    # whole library is worth refusing rather than performing quickly.
+    media_ids: list[str] = Field(min_length=1, max_length=500)
+
+
+class MediaBulkErrorOut(BaseModel):
+    media_id: str
+    error: str
+
+
+class MediaBulkDeleteOut(BaseModel):
+    """One line per file that went, plus the ones that could not, as `POST /review/bulk` does."""
+
+    deleted: list[str]
+    errors: list[MediaBulkErrorOut]
+    detections: int
+    tracks: int
+    templates: int
+    persons_unenrolled: int
+    objects_removed: int
+    rematch_job_id: str | None
+
+
 class TrackSampleOut(BaseModel):
     t_ms: int
     x: float
@@ -127,7 +181,7 @@ def upload_media(
     acquisition: Annotated[Literal["upload", "screen_capture"], Form()] = "upload",
     capture_mode: Annotated[CaptureMode | None, Form()] = None,
 ) -> MediaUploadOut:
-    """Multipart upload of one still image.
+    """Multipart upload of one image or video.
 
     `acquisition` says how the client came by these bytes, because the audit entry cannot
     tell an operator's file from a frame grabbed off their own screen by looking at the
@@ -141,8 +195,12 @@ def upload_media(
         )
 
     filename = file.filename or ""
+    suffix = Path(filename).suffix.lower()
     try:
-        suffix = decode.require_supported_image(filename)
+        # Validated by suffix before a byte is spooled, and the same call the ingest path
+        # uses to decide `media.kind`, so the upload and the folder import cannot disagree
+        # about what this file is.
+        decode.media_kind(filename)
     except decode.UnsupportedImageError as exc:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc)
@@ -233,7 +291,7 @@ def get_media_file(media_id: str, request: Request, conn: ConnDep, settings: Set
     row = conn.execute("SELECT path, sha256 FROM media WHERE id = ?", (media_id,)).fetchone()
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="media not found")
-    path = _resolve(settings, str(row["path"]))
+    path = storage.resolve(settings.media_dir, str(row["path"]))
     if not path.is_file():
         raise HTTPException(
             status_code=status.HTTP_410_GONE, detail="stored object is missing from the store"
@@ -256,6 +314,130 @@ def get_media_file(media_id: str, request: Request, conn: ConnDep, settings: Set
         status_code=status.HTTP_206_PARTIAL_CONTENT,
         media_type=media_type,
         headers=headers,
+    )
+
+
+@router.get("/{media_id}/thumbnail")
+def get_media_thumbnail(
+    media_id: str,
+    request: Request,
+    conn: ConnDep,
+    settings: SettingsDep,
+    size: Annotated[int, Query(ge=64, le=1024)] = THUMBNAIL_PX,
+) -> Response:
+    """A downscaled preview of the stored original, for the library's gallery layout.
+
+    The gallery exists to be looked at, and a grid of 3 MP originals is tens of megabytes of
+    transfer and a decoded bitmap per tile; the preview is the same picture at the size it is
+    actually drawn. Derived on request rather than stored: it is not evidence, nothing may be
+    enrolled or tagged from it (invariant 13), and a cache of downscaled faces is one more
+    pile of biometric material to purge. The ETag is the source digest and the size, so the
+    re-encode happens once per tile and the browser asks with `If-None-Match` after that.
+
+    A video's preview is its first decodable frame, downscaled the same way. One frame is
+    enough to recognise a clip by, and decoding one is cheap next to the sampling pass the
+    worker already ran over the whole file.
+    """
+    row = conn.execute(
+        "SELECT path, sha256, kind FROM media WHERE id = ?", (media_id,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="media not found")
+    etag = f'"{row["sha256"]}-{size}"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": etag})
+    path = storage.resolve(settings.media_dir, str(row["path"]))
+    if not path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE, detail="stored object is missing from the store"
+        )
+    try:
+        content = (
+            _thumbnail_bytes(path, size)
+            if str(row["kind"]) == MEDIA_KIND_IMAGE
+            else _poster_bytes(path, size)
+        )
+    except video.VideoDecodeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc)
+        ) from exc
+    return Response(
+        content=content,
+        media_type="image/jpeg",
+        headers={"ETag": etag, "Cache-Control": "private, max-age=86400"},
+    )
+
+
+@router.delete("/{media_id}", response_model=MediaPurgeOut)
+def delete_media(media_id: str, conn: ConnDep, settings: SettingsDep) -> MediaPurgeOut:
+    """Delete one file and everything derived from it (section 12). Irreversible.
+
+    A re-match follows only when the delete removed templates: that is the case where the
+    gallery every stored auto score was measured against has just changed. Deleting a file
+    nobody was enrolled from leaves the gallery exactly as it was.
+    """
+    try:
+        result = purge_media(conn, settings, media_id=media_id, actor=settings.operator_name)
+    except MediaNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    rematch_job_id: str | None = None
+    if result.templates > 0:
+        # `purged_media_id`, never `media_id`: that key is how the library finds the job
+        # that processed a file, and this job processes no file.
+        rematch_job_id = enqueue(
+            conn,
+            kind="rematch",
+            actor=settings.operator_name,
+            params={"reason": "media_purged", "purged_media_id": media_id},
+        ).id
+    return MediaPurgeOut(**result.as_json(), rematch_job_id=rematch_job_id)
+
+
+@router.post("/bulk_delete", response_model=MediaBulkDeleteOut)
+def bulk_delete_media(
+    body: MediaBulkDeleteIn, conn: ConnDep, settings: SettingsDep
+) -> MediaBulkDeleteOut:
+    """Delete several files in one operator action (section 12). Irreversible.
+
+    One purge per file, each with its own transaction and its own audit entry, the shape
+    `POST /api/review/bulk` uses: a file that cannot be deleted — already gone, or gone while
+    this request was running — is reported rather than rolling back the ones that could. The
+    re-match is queued once at the end, because the gallery is one thing however many files
+    the operator selected.
+    """
+    deleted: list[str] = []
+    errors: list[MediaBulkErrorOut] = []
+    totals = {"detections": 0, "tracks": 0, "templates": 0, "persons_unenrolled": 0}
+    objects_removed = 0
+    # Duplicates in the request are the same delete asked for twice; the second would be a
+    # spurious "already gone" error rather than a fact the operator needs.
+    for media_id in dict.fromkeys(body.media_ids):
+        try:
+            result = purge_media(
+                conn, settings, media_id=media_id, actor=settings.operator_name
+            )
+        except MediaNotFoundError as exc:
+            errors.append(MediaBulkErrorOut(media_id=media_id, error=str(exc)))
+            continue
+        deleted.append(media_id)
+        for key in totals:
+            totals[key] += int(getattr(result, key))
+        objects_removed += int(result.object_removed)
+
+    rematch_job_id: str | None = None
+    if totals["templates"] > 0:
+        rematch_job_id = enqueue(
+            conn,
+            kind="rematch",
+            actor=settings.operator_name,
+            params={"reason": "media_purged", "purged_media_ids": deleted},
+        ).id
+    return MediaBulkDeleteOut(
+        deleted=deleted,
+        errors=errors,
+        objects_removed=objects_removed,
+        rematch_job_id=rematch_job_id,
+        **totals,
     )
 
 
@@ -451,12 +633,9 @@ def _ingest(
     except decode.ImageDecodeError as exc:
         # Corrupt bytes are the client's problem, not a server fault: 400, never a 500.
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-
-
-def _resolve(settings: Settings, stored_path: str) -> Path:
-    """`media.path` is store-relative; absolute values (legacy imports) are used as-is."""
-    path = Path(stored_path)
-    return path if path.is_absolute() else settings.media_dir / path
+    except video.VideoDecodeError as exc:
+        # Same reasoning as a corrupt image: the file is the client's problem.
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 def _content_type(path: Path) -> str:
@@ -466,6 +645,31 @@ def _content_type(path: Path) -> str:
         return OCTET_STREAM
     Image.init()
     return Image.MIME.get(fmt, OCTET_STREAM)
+
+
+def _thumbnail_bytes(path: Path, size: int) -> bytes:
+    """JPEG preview of a stored original, at most `size` on its longest edge.
+
+    `exif_transpose` first: a phone photo carries its rotation in a tag, and a tile that
+    shows the face sideways is the one thing a preview must not do. `draft` lets the JPEG
+    decoder downscale while decoding, which is most of the cost of this function.
+    """
+    with Image.open(path) as image:
+        image.draft("RGB", (size, size))
+        upright = ImageOps.exif_transpose(image) or image
+        upright.thumbnail((size, size))
+        buffer = io.BytesIO()
+        upright.convert("RGB").save(buffer, format="JPEG", quality=82, optimize=True)
+    return buffer.getvalue()
+
+
+def _poster_bytes(path: Path, size: int) -> bytes:
+    """JPEG preview of a video's first decodable frame, at the same size as an image's."""
+    frame = Image.fromarray(video.first_frame(path))
+    frame.thumbnail((size, size))
+    buffer = io.BytesIO()
+    frame.save(buffer, format="JPEG", quality=82, optimize=True)
+    return buffer.getvalue()
 
 
 def _parse_range(header: str | None, size: int) -> tuple[int, int] | None:

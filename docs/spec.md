@@ -1,8 +1,15 @@
 # Local Face Match System: Design Spec
 
-Version: 0.7
+Version: 0.8
 Owner: Brock
 Status: All core decisions closed. Proposed items can change during build.
+
+Changes from 0.7:
+
+- The watch helper's overlay takes a click on one small numbered square per face instead of on the box and its label, so a hover-driven control in the watched window — a video player's auto-hiding bar — keeps working while the helper draws over it (6.11). The panel opens compact with its face list behind a disclosure, and remembers its size and that disclosure between runs.
+- Folder enrolment: `POST /api/persons/enroll_folder` turns a `Person Name/*.jpg` tree that has already been imported into persons and templates in one audited operator request with a required reason (6.6). It reads stored detections only, never the files on disk (invariant 13), and reports per file what it refused to guess rather than guessing.
+- The media library has two layouts: a gallery of previews and the existing list of rows. Both select files with a checkbox and delete them, one at a time with `DELETE /api/media/{id}` or as a selection with `POST /api/media/bulk_delete` (6.1, 12). A preview is a derived downscale served by `GET /api/media/{id}/thumbnail`; nothing is enrolled or tagged from it (invariant 13).
+- Video (M2): `app/pipeline/video.py` samples a container on a fixed time grid and `app/pipeline/tracking.py` tracks faces across those samples, both behind the existing `process` job, so a video and a still reach matching by the same path. The media detail view plays the file with a box overlay synchronised to the playhead, and a video's library preview is its first frame.
 
 Changes from 0.6:
 
@@ -156,11 +163,13 @@ Out of scope for v1:
 
 ### 6.1 Ingest
 
-- Accept images (JPEG, PNG, WebP, HEIC) and video (anything PyAV decodes).
+- Accept images (JPEG, PNG, WebP, HEIC) and video. The video containers accepted are listed in `video.SUPPORTED_VIDEO_SUFFIXES` (mp4, m4v, mov, avi, mkv, webm, mpg, mpeg, wmv): PyAV decodes more, but ingest has to decide `media.kind` from the suffix before anything opens the bytes, because probing an untrusted file would decode it ahead of the hash invariant 7 requires to come first.
 - Hash each file (SHA-256) before processing. Store content-addressed. Reuse stored bytes when the same file appears in another case.
 - Apply EXIF orientation for images before detection. Store the original unchanged.
 - Folder import: recursive, with a job per file.
 - A still image produces exactly one track per detection, with `start_ms = end_ms = 0`. Images and video therefore share one `tracks`/`identities` code path.
+- The library lists a case's files in two layouts, and the choice is remembered per browser: a gallery of previews, and a list carrying the hash, the dimensions and the job's progress. A preview is `GET /api/media/{id}/thumbnail`, a downscale derived on request from the stored original and never stored; it is a picture to recognise a file by, not evidence, and every decision is still made against the stored detection (invariant 13). Video has no preview until M2 decodes a frame for one.
+- A file can be deleted from the library, one at a time (`DELETE /api/media/{id}`) or as a selection (`POST /api/media/bulk_delete`), both section 12.
 
 ### 6.2 Processing pipeline (job worker)
 
@@ -185,7 +194,7 @@ Still images: one track per detection, `start_ms = end_ms = 0`. Step 3 is skippe
 
 Measurement domain change: `MIN_SHARPNESS` stays 40.0, but the quantity it bounds changed with the step 4 wording above. Sharpness values recorded in `detections.quality_json` before that change are in the old native-pixel domain and are not comparable with values recorded after it. Both remain a faithful record of the decision made at the time; anything that compares them across the boundary is comparing different units.
 
-Job resume: after each committed batch the worker writes a structured checkpoint into `jobs.progress` (last decoded `frame_idx`, last `t_ms`, per-stage counts). Resume reads that checkpoint rather than scanning for the last written row. Detection writes are idempotent on `(media_id, frame_idx)` under a unique index, so a job resumed inside the batch it died in cannot double-insert.
+Job resume: after each committed batch the worker writes a structured checkpoint into `jobs.progress` (last decoded `frame_idx`, last `t_ms`, per-stage counts, carried forward rather than restarted). Resume reads that checkpoint rather than scanning for the last written row, and seeks to the preceding keyframe so the decoder has its references. Detection writes are idempotent on `(media_id, frame_idx, det_idx)` under a unique index, and `frame_idx` is the sample grid's index — a function of the timestamp alone, never a decode ordinal — so the same frame occupies the same slot whether the job started at the beginning or resumed into the middle, and a job resumed inside the batch it died in cannot double-insert. What a resume does not carry is the tracker's own state: a face on screen at the moment of the kill becomes two tracks, one either side of the checkpoint. A track holding fewer detections than `track_min_hits` is swept at end of file, which is also what removes the tentative tracks a killed run left behind.
 
 Re-match job: when the gallery changes (new person or template), re-match stored track embeddings. No re-decode needed. Run it on demand or after each enrollment.
 
@@ -409,7 +418,8 @@ PATCH  /api/cases/{case_id}            {authorization_basis, reason?} -> CaseOut
                                        audited correction, keeps the old text (section 12)
 
 POST   /api/media                      multipart upload -> {media_id, sha256, job_id}
-POST   /api/media/import               {folder_path} -> {job_ids[]}
+POST   /api/media/import               {case_id, folder_path} ->
+                                       {job_ids[], media_ids[], reused}
 POST   /api/capture                    {case_id, mode, source_url} ->
                                        {media_id, sha256, job_id, reused}
                                        macOS screen capture, ingested as evidence (6.10)
@@ -449,6 +459,10 @@ GET    /api/persons?q=&status=
 POST   /api/persons
 GET    /api/persons/{id}
 POST   /api/persons/{id}/templates     from image upload or detection_id
+POST   /api/persons/enroll_folder      {case_id, folder_path, reason} -> persons[],
+                                       templates_created, skipped[], files_seen,
+                                       rematch_job_id. Bulk enrol from an imported
+                                       folder tree, one person per subfolder (6.6)
 
 GET    /api/models                     active detector and embedder, license per file (C7 banner)
 GET    /api/threshold_sets
@@ -569,8 +583,9 @@ face-match/
     app/api/           routers + deps.py (connection pool, effective settings)
     app/core/          interfaces, registry, scoring, acceptance, vectors, storage
     app/adapters/      yunet.py, scrfd.py, sface.py, arcface.py, boxes.py
-    app/pipeline/      ingest.py, decode.py, quality.py, align.py, process.py,
-                       matching.py, reembed.py, capture.py, live.py
+    app/pipeline/      ingest.py, decode.py, video.py, quality.py, align.py,
+                       tracking.py, process.py, matching.py, reembed.py,
+                       capture.py, live.py
     app/db/            conn.py, migrate.py, migrations/
     app/audit.py, app/worker.py, app/jobs.py, app/config.py, app/purge.py,
     app/runtime_config.py, app/models_lock.py, app/thresholds.py, app/cli.py,

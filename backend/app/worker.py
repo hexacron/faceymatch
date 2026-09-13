@@ -27,7 +27,13 @@ from app.db.conn import connect, transaction
 from app.db.migrate import migrate
 from app.jobs import Job, claim_next, finish, requeue_running
 from app.pipeline.matching import rematch
-from app.pipeline.process import mark_failed, process_image
+from app.pipeline.process import (
+    MEDIA_KIND_VIDEO,
+    MediaNotFoundError,
+    mark_failed,
+    process_image,
+    process_video,
+)
 from app.pipeline.reembed import reembed
 
 log = logging.getLogger("app.worker")
@@ -92,10 +98,24 @@ def handle_process(
         raise ValueError("process job requires a string media_id")
     lock = _verified_lock(settings)
     active = get_active_models(settings, lock)
-    result = process_image(
+    row = conn.execute("SELECT kind FROM media WHERE id = ?", (media_id,)).fetchone()
+    if row is None:
+        raise MediaNotFoundError(f"no media {media_id!r}")
+    if str(row["kind"]) == MEDIA_KIND_VIDEO:
+        # The job id goes in because a video checkpoints into its own `jobs.progress` and
+        # resumes from it after a kill (spec 6.2, "Job resume"). A still has nothing to
+        # resume: it is one frame and one transaction.
+        return process_video(
+            conn,
+            settings,
+            active,
+            media_id=media_id,
+            actor=settings.operator_name,
+            job_id=job.id,
+        ).as_progress()
+    return process_image(
         conn, settings, active, media_id=media_id, actor=settings.operator_name
-    )
-    return result.as_progress()
+    ).as_progress()
 
 
 def handle_rematch(

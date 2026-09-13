@@ -125,6 +125,17 @@ export type CaseList = {
 };
 
 /**
+ * `POST /api/cases`: both fields are required, because a case is the record of
+ * what permits processing everything that will be filed under it (spec 12).
+ */
+export type CaseCreate = {
+  /** 1..200 characters. */
+  name: string;
+  /** 1..2000 characters. */
+  authorization_basis: string;
+};
+
+/**
  * `PATCH /api/cases/{case_id}`: correct the record that justifies processing
  * everything already in the case. The response is the amended `Case`; the
  * amendment is audited with the old and the new text, so the previous basis

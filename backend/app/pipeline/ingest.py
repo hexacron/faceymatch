@@ -30,9 +30,10 @@ from app.config import Settings
 from app.core import storage
 from app.db.conn import transaction
 from app.ids import new_id
-from app.pipeline import decode
+from app.pipeline import decode, video
 
 MEDIA_KIND_IMAGE = "image"
+MEDIA_KIND_VIDEO = "video"
 MEDIA_STATUS_NEW = "new"
 
 AcquisitionMode = Literal["upload", "folder_import", "screen_capture"]
@@ -84,12 +85,13 @@ def ingest_file(
     actor: str,
     acquisition: Acquisition = UPLOAD,
 ) -> IngestResult:
-    """Register one still image in `case_id` and queue its processing job.
+    """Register one image or video in `case_id` and queue its processing job.
 
     Raises `UnsupportedImageError` for a suffix we do not decode, `CorruptImageError` for
-    bytes that are not a readable image, and `CaseNotFoundError` for an unknown case.
+    bytes that are not a readable image, `VideoDecodeError` for a video that will not open,
+    and `CaseNotFoundError` for an unknown case.
     """
-    decode.require_supported_image(src)
+    kind = decode.media_kind(src)
     require_case(conn, case_id)
 
     # Invariant 7: hash (and store) before any processing touches the pixels.
@@ -104,8 +106,14 @@ def ingest_file(
             reused=True,
         )
 
-    image = decode.decode_image(src)
-    height, width = int(image.shape[0]), int(image.shape[1])
+    if kind == MEDIA_KIND_VIDEO:
+        # Dimensions from the container, not from a decoded frame: the worker will sample
+        # this file properly, and the library wants a size to show before it gets there.
+        info = video.probe(src)
+        width, height = info.width, info.height
+    else:
+        image = decode.decode_image(src)
+        height, width = int(image.shape[0]), int(image.shape[1])
     rel_path = storage.relative_path_for(digest)
     media_id = new_id()
     now = audit.now_ts()
@@ -120,7 +128,7 @@ def ingest_file(
                     media_id,
                     case_id,
                     digest,
-                    MEDIA_KIND_IMAGE,
+                    kind,
                     rel_path,
                     source_url,
                     width,
@@ -138,7 +146,7 @@ def ingest_file(
                 case_id=case_id,
                 payload={
                     "sha256": digest,
-                    "kind": MEDIA_KIND_IMAGE,
+                    "kind": kind,
                     "path": rel_path,
                     "size_bytes": size_bytes,
                     "width": width,

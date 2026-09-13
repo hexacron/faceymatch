@@ -5,7 +5,7 @@ import { DeletePersonButton, type GalleryNotice } from "../components/GalleryCon
 import { GalleryState } from "../components/GalleryState";
 import { Loaded } from "../components/Loading";
 import { formatTs } from "../lib/display";
-import { setPersonsLayout, usePersonsLayout } from "../lib/personsLayout";
+import { setPersonsLayout, usePersonsLayout } from "../lib/layout";
 import { hrefFor } from "../lib/router";
 import { useResource } from "../lib/useResource";
 
