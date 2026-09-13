@@ -27,6 +27,9 @@ export default defineConfig({
   },
   build: {
     outDir: "dist",
-    sourcemap: true,
+    // The backend serves dist/ as-is, so a sourcemap here is a 1.3 MB file shipped beside
+    // a 300 KB bundle for a build nobody debugs from the browser. `bun run dev` keeps its
+    // own maps; this switch only affects the production bundle the operator loads.
+    sourcemap: false,
   },
 });

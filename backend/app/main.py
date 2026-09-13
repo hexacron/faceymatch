@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app import audit, models_lock, runtime_config
@@ -160,6 +161,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(models_router.router)
     app.include_router(config_router.router)
 
+    # The bundle is one 300 KB chunk and the API returns JSON lists; both compress by
+    # roughly 3.5x. Loopback is not slow, but the browser still parses what it is sent, and
+    # nothing here leaves the machine, so there is no traffic-analysis argument against it.
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
     # Mounted last so /api never collides with a built asset path.
     if resolved.frontend_dist.is_dir():
         app.mount(
