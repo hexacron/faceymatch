@@ -90,6 +90,9 @@ class LiveResult:
     width: int
     height: int
     faces: list[LiveFace]
+    # Whether identification was asked for. A client has to be able to tell "no candidates
+    # were found" from "we did not look" — they render as very different things.
+    identified: bool
     threshold_set_id: str | None
     auto_accept_allowed: bool
     auto_accept_reason: str | None
@@ -106,6 +109,9 @@ class Gallery:
     person_ids: list[str]
     template_ids: list[str]
     names: dict[str, str]
+    # Built with the matrix, because every frame reduces over the same rows and deriving
+    # the grouping from the id strings per face is the reduction's whole cost.
+    person_index: scoring.PersonIndex
     # The audit chain head hash the matrix was loaded at. A hash rather than the sequence
     # number: it identifies the chain as well as its length, so a cached matrix can never
     # be served to a different database that happens to be the same number of entries in.
@@ -113,7 +119,7 @@ class Gallery:
 
     @property
     def persons(self) -> int:
-        return len(set(self.person_ids))
+        return len(self.person_index.persons)
 
 
 @dataclass
@@ -171,6 +177,7 @@ def _load_gallery(
         person_ids=person_ids,
         template_ids=[str(row["id"]) for row in rows],
         names={str(row["person_id"]): str(row["display_name"]) for row in rows},
+        person_index=scoring.PersonIndex.build(person_ids),
         version=version,
     )
 
@@ -181,11 +188,20 @@ def match_frame(
     models: ActiveModels,
     *,
     frame: bytes | np.ndarray,
+    identify: bool = True,
 ) -> LiveResult:
     """Score one frame against the gallery without writing anything.
 
     `frame` is either encoded image bytes (what the endpoint receives) or an already
     decoded RGB array. Raises `decode.ImageDecodeError` for undecodable bytes.
+
+    `identify=False` answers "where are the faces" and nothing else: the quality gate still
+    runs, so a rejected face is still reported as rejected, but no crop is warped, nothing
+    is embedded and no gallery row is scored. It exists because a box tracking a moving
+    face is worth more to the operator than a name arriving a third of a second late, and
+    the embedder is most of that third of a second. `embed` and `match` are reported as
+    0.0 because no embedding and no scoring happened; the gallery and gate are still read
+    (both cached) so `gallery_persons` and `auto_accept_allowed` mean what they always mean.
     """
     started = time.perf_counter()
 
@@ -199,11 +215,15 @@ def match_frame(
 
     prepare_start = time.perf_counter()
     reports = [quality.evaluate(image, detection, settings) for detection in detections]
-    crops = [
-        align.align_crop(image, detection.landmarks)
-        for detection, report in zip(detections, reports, strict=True)
-        if report.passed
-    ]
+    crops = (
+        [
+            align.align_crop(image, detection.landmarks)
+            for detection, report in zip(detections, reports, strict=True)
+            if report.passed
+        ]
+        if identify
+        else []
+    )
     quality_align_ms = _since(prepare_start)
 
     embed_start = time.perf_counter()
@@ -214,7 +234,7 @@ def match_frame(
         if crops
         else np.zeros((0, models.embedder.dim), dtype=np.float32)
     )
-    embed_ms = _since(embed_start)
+    embed_ms = _since(embed_start) if identify else 0.0
 
     match_start = time.perf_counter()
     gallery = gallery_for(conn, embedder_model_id=models.embedder_model_id)
@@ -231,7 +251,7 @@ def match_frame(
     )
 
     ranked: list[tuple[list[PersonCandidate], Band]] = []
-    if len(crops) > 0 and gate is not None and gallery.matrix.shape[0] > 0:
+    if identify and len(crops) > 0 and gate is not None and gallery.matrix.shape[0] > 0:
         scores = scoring.cosine_scores(embeddings, gallery.matrix)
         for row in scores:
             scored = scoring.rank_persons(
@@ -240,10 +260,11 @@ def match_frame(
                 gallery.template_ids,
                 mode=settings.person_score_mode,
                 top_k=settings.top_k,
+                index=gallery.person_index,
             )
             band, _, _ = scoring.band_for_candidates(scored, gate.thresholds)
             ranked.append((scored, band))
-    match_ms = _since(match_start)
+    match_ms = _since(match_start) if identify else 0.0
 
     faces: list[LiveFace] = []
     passed_idx = 0
@@ -282,6 +303,7 @@ def match_frame(
         width=width,
         height=height,
         faces=faces,
+        identified=identify,
         threshold_set_id=None if gate is None else gate.threshold_set_id,
         auto_accept_allowed=False if gate is None else gate.allowed,
         auto_accept_reason=(

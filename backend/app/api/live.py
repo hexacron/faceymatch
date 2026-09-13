@@ -61,6 +61,9 @@ class LiveMatchOut(BaseModel):
     width: int
     height: int
     faces: list[LiveFaceOut]
+    # Echoes the request, so a client can tell an empty candidate list from a frame nobody
+    # was asked to identify.
+    identified: bool
     threshold_set_id: str | None
     # The gate for the *stored* path. No live face is ever accepted: this only lets the UI
     # say why a stored match would not self-confirm either (invariant 4).
@@ -78,12 +81,17 @@ def match_live_frame(
     lock: LockDep,
     frame: Annotated[UploadFile, File()],
     case_id: Annotated[str | None, Form()] = None,
+    identify: Annotated[bool, Form()] = True,
 ) -> LiveMatchOut:
     """Detect and score one frame. Nothing is persisted.
 
     `case_id` is optional and does not scope the gallery — persons and templates are global
     (spec 7, 12). It is validated when present so a stale case id in the UI surfaces as a
     404 here rather than silently mattering nowhere.
+
+    `identify=false` returns boxes and the quality verdict only: no crop is warped, nothing
+    is embedded, no gallery row is scored. It is for a client that wants boxes to track a
+    moving face at detector latency and can ask for names less often.
     """
     if case_id:
         try:
@@ -101,7 +109,7 @@ def match_live_frame(
     # Cached per process: ONNX sessions are built once, never per request.
     models = get_active_models(settings, lock)
     try:
-        result = live.match_frame(conn, settings, models, frame=data)
+        result = live.match_frame(conn, settings, models, frame=data, identify=identify)
     except decode.ImageDecodeError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -131,6 +139,7 @@ def match_live_frame(
             )
             for face in result.faces
         ],
+        identified=result.identified,
         threshold_set_id=result.threshold_set_id,
         auto_accept_allowed=result.auto_accept_allowed,
         auto_accept_reason=result.auto_accept_reason,

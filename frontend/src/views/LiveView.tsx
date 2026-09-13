@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
 
 import { ApiError, errorMessage } from "../api/client";
-import type { CaseList, LiveFace, LiveMatchResult } from "../api/types";
+import type { CaseList, LiveFace, LiveMatchResult, LiveTimings } from "../api/types";
 import { BandPill } from "../components/BandPill";
 import { CaseBasis } from "../components/CaseBasis";
 import { Loaded } from "../components/Loading";
 import { BAND_COLOR, formatScore, NO_BAND_COLOR } from "../lib/display";
 import {
+  bestOverlapRect,
   containLetterbox,
   hitTestImageRects,
   imageRectToCss,
@@ -21,6 +22,8 @@ import {
   useSelectedCase,
 } from "../lib/ingest";
 import {
+  BOX_MAX_PIXELS,
+  BOX_QUALITY,
   encodeFrame,
   FRAME_MAX_PIXELS,
   matchFrame,
@@ -36,6 +39,31 @@ const FPS_CHOICES: readonly number[] = [1, 2, 3, 5, 8];
 const DEFAULT_FPS = 3;
 /** Floor the backend asked for, whatever rate the operator picks. */
 const MIN_PERIOD_MS = 150;
+/**
+ * Every third tick asks for names; the other two ask only for boxes.
+ *
+ * Identification is most of a tick — embedding three faces costs more than
+ * decode, detect and the gallery matmul together — and a box that tracks the
+ * face is what the operator is actually watching. Names refresh at fps/3,
+ * which for the default 3 fps is once a second: faster than anyone reads them.
+ */
+const IDENTIFY_EVERY = 3;
+/**
+ * How much a box from a boxes-only tick must overlap a box from the last
+ * identify tick before it inherits its label. Same measure the stored-media
+ * handoff uses; 0.3 tolerates a face moving between the two ticks and still
+ * refuses to move a name onto a different face.
+ */
+const LABEL_MIN_IOU = 0.3;
+
+/** Backend stage timings, in the order the pipeline runs them. */
+const STAGES: readonly (readonly [keyof LiveTimings, string])[] = [
+  ["decode", "Decode"],
+  ["detect", "Detect"],
+  ["quality_align", "Align"],
+  ["embed", "Embed"],
+  ["match", "Match"],
+];
 
 type Phase = "idle" | "starting" | "running" | "hidden" | "stopped";
 
@@ -48,9 +76,19 @@ type Metrics = {
   effectiveFps: number;
   /** Ticks skipped because the previous frame was still in flight. */
   dropped: number;
+  /** Per-stage backend time for the last frame, and which cadence produced it. */
+  timings: LiveTimings | null;
+  identified: boolean;
 };
 
-const NO_METRICS: Metrics = { elapsedMs: 0, roundTripMs: 0, effectiveFps: 0, dropped: 0 };
+const NO_METRICS: Metrics = {
+  elapsedMs: 0,
+  roundTripMs: 0,
+  effectiveFps: 0,
+  dropped: 0,
+  timings: null,
+  identified: false,
+};
 
 /**
  * The working resolution of the last frame, which is also the resolution a
@@ -68,24 +106,54 @@ function faceRect(face: LiveFace): Rect {
   return { x: face.x, y: face.y, w: face.w, h: face.h };
 }
 
-function faceLabel(face: LiveFace): string {
+function faceLabel(face: LiveFace, identity: LiveFace | null): string {
   if (!face.quality_passed) {
     const reason = face.quality_reasons[0] ?? "quality gate";
     return `quality gate: ${reason}`;
   }
-  const top = face.candidates.find((candidate) => candidate.rank === 1) ?? face.candidates[0];
+  if (identity === null) {
+    // A box from a cadence that did not ask, or a face the last identify pass
+    // did not see. Either way the honest answer is "not yet", not "no match".
+    return "identifying…";
+  }
+  const top =
+    identity.candidates.find((candidate) => candidate.rank === 1) ?? identity.candidates[0];
   if (top === undefined) {
     return "unidentified · no match";
   }
   return `${top.name} · ${top.band} ${formatScore(top.score)}`;
 }
 
-function faceColor(face: LiveFace): string {
-  if (!face.quality_passed) {
+function faceColor(face: LiveFace, identity: LiveFace | null): string {
+  if (!face.quality_passed || identity === null) {
     return NO_BAND_COLOR;
   }
-  const top = face.candidates.find((candidate) => candidate.rank === 1) ?? face.candidates[0];
+  const top =
+    identity.candidates.find((candidate) => candidate.rank === 1) ?? identity.candidates[0];
   return top === undefined ? NO_BAND_COLOR : BAND_COLOR[top.band];
+}
+
+/**
+ * The face in the last identify pass that this box is, or null.
+ *
+ * The two cadences encode at different resolutions, so both sides are
+ * normalised to fractions of their own frame before they are compared — the
+ * same trick the live-to-stored handoff uses.
+ */
+function identityFor(
+  face: LiveFace,
+  boxes: LiveMatchResult,
+  identities: LiveMatchResult | null,
+): LiveFace | null {
+  if (identities === null) {
+    return null;
+  }
+  const target = normalizeRect(faceRect(face), boxes.width, boxes.height);
+  const candidates = identities.faces.map((other) =>
+    normalizeRect(faceRect(other), identities.width, identities.height),
+  );
+  const hit = bestOverlapRect(candidates, target, LABEL_MIN_IOU);
+  return hit === null ? null : (identities.faces[hit] ?? null);
 }
 
 export default function LiveView() {
@@ -94,11 +162,20 @@ export default function LiveView() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  /** The frame the boxes on screen came from: what a click persists. */
+  /**
+   * The last *identify* frame, and the only thing a click may persist.
+   *
+   * A boxes-only frame is a 1 MP q0.7 encode that no gallery ever saw; storing
+   * it as evidence would put a crop in the template store that the quality
+   * gate was never run against at that resolution. So it is never retained.
+   */
   const frameRef = useRef<Frame | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
   const [fps, setFps] = useState(DEFAULT_FPS);
-  const [result, setResult] = useState<LiveMatchResult | null>(null);
+  /** Latest result of either cadence: where the boxes on screen come from. */
+  const [boxes, setBoxes] = useState<LiveMatchResult | null>(null);
+  /** Latest identify result: where the labels come from, and what a click acts on. */
+  const [identities, setIdentities] = useState<LiveMatchResult | null>(null);
   const [metrics, setMetrics] = useState<Metrics>(NO_METRICS);
   /**
    * Two error channels on purpose.
@@ -161,7 +238,8 @@ export default function LiveView() {
           stop();
         });
       }
-      setResult(null);
+      setBoxes(null);
+      setIdentities(null);
       setMetrics(NO_METRICS);
       setGeometry(null);
       frameRef.current = null;
@@ -217,14 +295,22 @@ export default function LiveView() {
     let stopped = false;
     let dropped = 0;
     let matched = 0;
+    let tick = 0;
+    /**
+     * The true round trip of the last tick, not the backend's own figure.
+     *
+     * The backoff exists so a machine that cannot keep up stops queueing work,
+     * and encode plus wire is most of what it cannot keep up with — sizing the
+     * period off `elapsed_ms` made the loop blind to exactly the cost the two
+     * cadences were introduced to cut.
+     */
     let lastElapsed = 0;
     let windowStart = performance.now();
 
     const loop = async (): Promise<void> => {
       while (!stopped) {
-        // The chosen rate is a ceiling; measured backend time is the floor, so
-        // the loop backs off on its own when the machine is busy (the backend
-        // measures ~9 ms for an empty frame and ~40 ms for three faces).
+        // The chosen rate is a ceiling; the measured round trip is the floor, so
+        // the loop backs off on its own when the machine is busy.
         const period = Math.max(targetPeriod, MIN_PERIOD_MS, 2 * lastElapsed);
         const video = videoRef.current;
         if (video === null || video.readyState < 2) {
@@ -233,23 +319,34 @@ export default function LiveView() {
         }
         const tickStart = performance.now();
         try {
-          const frame = await encodeFrame(video, canvas);
+          const identify = tick % IDENTIFY_EVERY === 0;
+          tick += 1;
+          const frame = await encodeFrame(
+            video,
+            canvas,
+            identify ? {} : { maxPixels: BOX_MAX_PIXELS, quality: BOX_QUALITY },
+          );
           if (frame !== null) {
-            const matchResult = await matchFrame(frame, caseId, controller.signal);
+            const matchResult = await matchFrame(frame, caseId, controller.signal, { identify });
             if (stopped) {
               return;
             }
-            frameRef.current = frame;
-            setResult(matchResult);
-            setGeometry({
-              width: frame.width,
-              height: frame.height,
-              sourceWidth: frame.sourceWidth,
-              sourceHeight: frame.sourceHeight,
-            });
+            setBoxes(matchResult);
+            if (matchResult.identified) {
+              // Only an identify frame is evidence, and only its geometry
+              // describes what a click would store.
+              frameRef.current = frame;
+              setIdentities(matchResult);
+              setGeometry({
+                width: frame.width,
+                height: frame.height,
+                sourceWidth: frame.sourceWidth,
+                sourceHeight: frame.sourceHeight,
+              });
+            }
             matched += 1;
-            lastElapsed = matchResult.elapsed_ms;
             const spent = performance.now() - tickStart;
+            lastElapsed = spent;
             // Ticks the requested rate wanted during this frame's round trip.
             dropped += Math.max(0, Math.floor(spent / targetPeriod) - 1);
             const sinceWindow = performance.now() - windowStart;
@@ -258,6 +355,8 @@ export default function LiveView() {
               roundTripMs: Math.round(spent),
               effectiveFps: sinceWindow > 0 ? (matched * 1_000) / sinceWindow : 0,
               dropped,
+              timings: matchResult.timings,
+              identified: matchResult.identified,
             });
             if (sinceWindow > 4_000) {
               // Short measurement window so the reading tracks the current rate.
@@ -292,6 +391,14 @@ export default function LiveView() {
     };
   }, [caseId, fps, phase]);
 
+  /**
+   * Cursor position in CSS pixels relative to the overlay, or null when the
+   * pointer is elsewhere. A ref rather than state: the pointer moves at the
+   * display rate and every move would otherwise re-render the whole view; the
+   * handler redraws the canvas directly instead.
+   */
+  const pointerRef = useRef<{ x: number; y: number } | null>(null);
+
   // Draw the overlay with the same letterbox and DPR mapping the stored media
   // overlay uses, so a box means the same thing in both views.
   const draw = useCallback(() => {
@@ -307,25 +414,40 @@ export default function LiveView() {
       return;
     }
     context.clearRect(0, 0, cssWidth, cssHeight);
-    if (result === null) {
+    if (boxes === null) {
       return;
     }
-    const box = containLetterbox(result.width, result.height, cssWidth, cssHeight);
+    const box = containLetterbox(boxes.width, boxes.height, cssWidth, cssHeight);
     if (box.scale <= 0) {
       return;
     }
-    for (const face of result.faces) {
+    // Labels are on demand, not always on. A permanent caption over every box
+    // covers the faces the operator is trying to look at, and the reasons are
+    // long ("quality gate: width_below_min_embed"). The list beside the video
+    // carries the same text for every face at once; the overlay captions only
+    // the box under the cursor.
+    const pointer = pointerRef.current;
+    const hovered =
+      pointer === null
+        ? null
+        : hitTestImageRects(boxes.faces.map(faceRect), pointer.x, pointer.y, box);
+
+    for (const [index, face] of boxes.faces.entries()) {
+      const identity = identityFor(face, boxes, identities);
       const rect = imageRectToCss(faceRect(face), box);
-      const color = faceColor(face);
+      const color = faceColor(face, identity);
       context.strokeStyle = color;
-      context.lineWidth = 2;
+      context.lineWidth = index === hovered ? 3 : 2;
       // A face the gate rejected is dashed and muted: it is not being matched,
       // and the operator has to be able to see that at a glance.
       context.setLineDash(face.quality_passed ? [] : [6, 4]);
       context.strokeRect(rect.x, rect.y, rect.w, rect.h);
       context.setLineDash([]);
+      if (index !== hovered) {
+        continue;
+      }
 
-      const label = faceLabel(face);
+      const label = faceLabel(face, identity);
       context.font = "12px ui-monospace, SFMono-Regular, Menlo, monospace";
       const labelWidth = Math.min(context.measureText(label).width + 10, cssWidth - rect.x);
       const labelY = Math.max(0, rect.y - 21);
@@ -334,22 +456,36 @@ export default function LiveView() {
       context.fillStyle = color;
       context.fillText(label, rect.x + 5, labelY + 14, Math.max(0, labelWidth - 10));
     }
-  }, [result]);
+  }, [boxes, identities]);
+
+  // `draw` changes identity on every result, and rebuilding the observer with
+  // it disconnected and re-registered one per tick. The observer only ever
+  // needs to call the latest `draw`, so it reads it from a ref and is
+  // registered once per mount.
+  const drawRef = useRef(draw);
+  drawRef.current = draw;
+
+  useEffect(() => {
+    drawRef.current();
+  }, [draw]);
 
   useEffect(() => {
     const video = videoRef.current;
     if (video === null) {
       return;
     }
-    const observer = new ResizeObserver(draw);
+    const redraw = (): void => {
+      drawRef.current();
+    };
+    const observer = new ResizeObserver(redraw);
     observer.observe(video);
-    window.addEventListener("resize", draw);
-    draw();
+    window.addEventListener("resize", redraw);
+    redraw();
     return () => {
       observer.disconnect();
-      window.removeEventListener("resize", draw);
+      window.removeEventListener("resize", redraw);
     };
-  }, [draw]);
+  }, []);
 
   /**
    * Persist the clicked face, then hand off to the tag panel.
@@ -357,12 +493,27 @@ export default function LiveView() {
    * This is the only route from a live face to an identity, because the live
    * endpoint stores nothing: the frame becomes evidence first, and the stored
    * detection is what gets tagged.
+   *
+   * It acts on the *identify* frame and the face the identify pass found there
+   * — never on a boxes-only tick. Those bytes were never stored and the box
+   * would be pointing into a frame that does not exist as evidence.
    */
   async function enrollFace(index: number): Promise<void> {
     const frame = frameRef.current;
-    const current = result;
-    const face = current?.faces[index];
-    if (frame === null || current === null || face === undefined) {
+    const face = boxes?.faces[index];
+    if (boxes === null || face === undefined) {
+      return;
+    }
+    if (frame === null || identities === null) {
+      setActionError("Waiting for the first identify pass — nothing is stored yet.");
+      return;
+    }
+    const identity = identityFor(face, boxes, identities);
+    if (identity === null) {
+      setActionError(
+        "That face was not in the last identify pass, so there is no stored frame showing " +
+          "it. Give it a moment and click again.",
+      );
       return;
     }
     if (caseId === "") {
@@ -376,7 +527,8 @@ export default function LiveView() {
       navigate({
         view: "viewer",
         mediaId: upload.media_id,
-        focus: normalizeRect(faceRect(face), current.width, current.height),
+        // The identify frame's own geometry: that is the media being stored.
+        focus: normalizeRect(faceRect(identity), identities.width, identities.height),
       });
     } catch (failure) {
       setActionError(
@@ -392,13 +544,13 @@ export default function LiveView() {
   function onCanvasClick(event: MouseEvent<HTMLCanvasElement>): void {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    if (video === null || canvas === null || result === null) {
+    if (video === null || canvas === null || boxes === null) {
       return;
     }
     const bounds = canvas.getBoundingClientRect();
-    const box = containLetterbox(result.width, result.height, video.clientWidth, video.clientHeight);
+    const box = containLetterbox(boxes.width, boxes.height, video.clientWidth, video.clientHeight);
     const hit = hitTestImageRects(
-      result.faces.map(faceRect),
+      boxes.faces.map(faceRect),
       event.clientX - bounds.left,
       event.clientY - bounds.top,
       box,
@@ -408,8 +560,25 @@ export default function LiveView() {
     }
   }
 
+  function onCanvasPointerMove(event: MouseEvent<HTMLCanvasElement>): void {
+    const canvas = canvasRef.current;
+    if (canvas === null) {
+      return;
+    }
+    const bounds = canvas.getBoundingClientRect();
+    pointerRef.current = { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
+    // Redraw straight from the handler: the pointer lives in a ref precisely so
+    // moving it does not re-render the view at the display rate.
+    drawRef.current();
+  }
+
+  function onCanvasPointerLeave(): void {
+    pointerRef.current = null;
+    drawRef.current();
+  }
+
   const live = phase === "running" || phase === "hidden";
-  const uncalibrated = result !== null && !result.auto_accept_allowed;
+  const uncalibrated = boxes !== null && !boxes.auto_accept_allowed;
   const noCase = caseId === "";
   // Matching needs no case (it writes nothing); persisting does, so only the
   // persisting controls are gated and the destination is named on them.
@@ -484,22 +653,38 @@ export default function LiveView() {
           <div><dt>Round trip</dt><dd className="mono">{metrics.roundTripMs} ms</dd></div>
           <div><dt>Effective</dt><dd className="mono">{metrics.effectiveFps.toFixed(1)} fps</dd></div>
           <div><dt>Dropped</dt><dd className="mono">{metrics.dropped}</dd></div>
-          <div><dt>Gallery</dt><dd className="mono">{result?.gallery_persons ?? "—"}</dd></div>
+          <div><dt>Gallery</dt><dd className="mono">{boxes?.gallery_persons ?? "—"}</dd></div>
           <div>
             <dt>Frame</dt>
             <dd className="mono">
               {geometry === null ? "—" : `${String(geometry.width)}×${String(geometry.height)}`}
             </dd>
           </div>
+          {/* Which cadence produced the boxes on screen, and what each backend stage
+              cost on it. Without this the operator cannot see which stage hurts, and
+              a boxes-only tick reading 0 ms of embed is the whole point of the split. */}
+          <div>
+            <dt>Pass</dt>
+            <dd className="mono">{metrics.identified ? "identify" : "boxes"}</dd>
+          </div>
+          {STAGES.map(([key, label]) => (
+            <div key={key}>
+              <dt>{label}</dt>
+              <dd className="mono">
+                {metrics.timings === null ? "—" : `${metrics.timings[key].toFixed(1)} ms`}
+              </dd>
+            </div>
+          ))}
         </dl>
       </div>
 
       {geometry !== null && geometry.width !== geometry.sourceWidth && (
         <p className="notice" role="status">
-          Frames are capped at {(FRAME_MAX_PIXELS / 1_000_000).toFixed(1)} megapixels to keep
-          sampling interactive, and the shared surface is {geometry.sourceWidth}×
+          Identify frames are capped at {(FRAME_MAX_PIXELS / 1_000_000).toFixed(1)} megapixels
+          to keep sampling interactive, and the shared surface is {geometry.sourceWidth}×
           {geometry.sourceHeight}, so both the match and the stored evidence use{" "}
-          {geometry.width}×{geometry.height} — the same pixels either way.
+          {geometry.width}×{geometry.height} — the same pixels either way. Boxes-only
+          frames are smaller still, and are never stored.
         </p>
       )}
       {phase === "hidden" && (
@@ -508,7 +693,7 @@ export default function LiveView() {
       {uncalibrated && (
         <p className="notice" role="status">
           No calibrated threshold set is active
-          {result?.auto_accept_reason === null ? "" : `: ${result?.auto_accept_reason ?? ""}`}. Every
+          {boxes?.auto_accept_reason === null ? "" : `: ${boxes?.auto_accept_reason ?? ""}`}. Every
           match here is a candidate for an operator decision, never an acceptance.
         </p>
       )}
@@ -523,7 +708,9 @@ export default function LiveView() {
             <canvas
               ref={canvasRef}
               onClick={onCanvasClick}
-              aria-label="Live face overlay. Use the list beside the video to save and tag a face."
+              onMouseMove={onCanvasPointerMove}
+              onMouseLeave={onCanvasPointerLeave}
+              aria-label="Live face overlay. Hover a box to read its label. Use the list beside the video to save and tag a face."
             />
           </div>
           {phase === "idle" && (
@@ -546,28 +733,29 @@ export default function LiveView() {
               Saved frames are filed to <strong>{caseName ?? "the selected case"}</strong>.
             </p>
           )}
-          {result === null ? (
+          {boxes === null ? (
             <p className="muted">No frame has been matched yet.</p>
-          ) : result.faces.length === 0 ? (
+          ) : boxes.faces.length === 0 ? (
             <p className="muted">No face detected in the current frame.</p>
           ) : (
             <ul className="candidate-list">
-              {result.faces.map((face, index) => {
-                const top = face.candidates.find((candidate) => candidate.rank === 1);
+              {boxes.faces.map((face, index) => {
+                const identity = identityFor(face, boxes, identities);
+                const top = identity?.candidates.find((candidate) => candidate.rank === 1);
                 return (
                   <li className="live-face" key={`${String(index)}-${String(Math.round(face.x))}`}>
                     <div className="live-face-head">
-                      {face.quality_passed ? (
-                        top === undefined ? (
-                          <span>Unidentified</span>
-                        ) : (
-                          <>
-                            <span>{top.name}</span>
-                            <BandPill band={top.band} score={top.score} />
-                          </>
-                        )
-                      ) : (
+                      {!face.quality_passed ? (
                         <span className="muted">Not matched · quality gate</span>
+                      ) : identity === null ? (
+                        <span className="muted">Identifying…</span>
+                      ) : top === undefined ? (
+                        <span>Unidentified</span>
+                      ) : (
+                        <>
+                          <span>{top.name}</span>
+                          <BandPill band={top.band} score={top.score} />
+                        </>
                       )}
                     </div>
                     <p className="compact muted">
@@ -576,7 +764,7 @@ export default function LiveView() {
                     </p>
                     <button
                       type="button"
-                      disabled={persisting || noCase}
+                      disabled={persisting || noCase || identity === null}
                       {...(noCase ? { title: noCaseRefusal("saving a frame") } : {})}
                       onClick={() => void enrollFace(index)}
                     >

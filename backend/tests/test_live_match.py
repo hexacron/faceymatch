@@ -347,6 +347,67 @@ def test_live_match_endpoint_returns_boxes_and_candidates(
         assert _counts(conn) == before
 
 
+class RefusingEmbedder:
+    """Proves the boxes-only path never reaches the embedder, rather than assuming it."""
+
+    model_id = "embedder"
+    dim = 2
+
+    def embed(self, crops: np.ndarray) -> np.ndarray:
+        raise AssertionError("identify=false must not embed anything")
+
+
+def test_boxes_only_frames_skip_identification_entirely(
+    settings: Settings, conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tick that only wants boxes must not pay for alignment, embedding or scoring."""
+    tuned = settings.model_copy(update={"min_embed_px": 40, "min_sharpness": 0.0})
+
+    def fake_active(*_args: Any, **_kwargs: Any) -> ActiveModels:
+        return _models(FakeDetector([(20.0, 20.0), (60.0, 60.0)]), RefusingEmbedder())
+
+    monkeypatch.setattr(live_api, "get_active_models", fake_active)
+    with TestClient(create_app(tuned)) as client:
+        _seed(conn)
+        before = _counts(conn)
+
+        response = client.post(
+            "/api/live/match",
+            data={"case_id": "case", "identify": "false"},
+            files={"frame": ("frame.png", _frame(), "image/png")},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["identified"] is False
+    assert len(body["faces"]) == 2
+    assert all(face["candidates"] == [] for face in body["faces"])
+    assert all(face["quality_passed"] is True for face in body["faces"])
+    assert body["timings"]["embed"] == 0.0
+    assert body["timings"]["match"] == 0.0
+    # The reporting fields still mean what they mean; only identification was skipped.
+    assert body["gallery_persons"] == 1
+    assert body["threshold_set_id"] == "threshold"
+    assert _counts(conn) == before
+
+
+def test_an_identify_pass_says_so(
+    settings: Settings, conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`identified` is the client's only way to tell "nothing found" from "not asked"."""
+    tuned = settings.model_copy(update={"min_embed_px": 40, "min_sharpness": 0.0})
+    with _client_with_models(tuned, monkeypatch) as client:
+        _seed(conn)
+        response = client.post(
+            "/api/live/match", files={"frame": ("frame.png", _frame(), "image/png")}
+        )
+
+    body = response.json()
+    assert body["identified"] is True
+    assert body["faces"][0]["candidates"]
+    assert body["timings"]["embed"] > 0.0
+
+
 def test_live_match_endpoint_rejects_an_unknown_case_and_undecodable_bytes(
     settings: Settings, conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:

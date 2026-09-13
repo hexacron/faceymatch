@@ -50,6 +50,25 @@ export const FRAME_MAX_PIXELS = 16_800_000;
  */
 export const FRAME_QUALITY = 0.92;
 
+/**
+ * Pixel budget and quality for a boxes-only tick.
+ *
+ * A boxes-only frame is never stored and never embedded, so none of the
+ * evidence-quality argument above applies to it: it exists to put a rectangle
+ * on a moving face, and the detector's input is a fixed 640x640 letterbox
+ * whatever it is handed. Encode plus wire costs roughly 13 ms per megapixel at
+ * q0.7 against roughly 103 ms per megapixel at full resolution and q0.92, so
+ * this is where the two cadences actually diverge.
+ */
+export const BOX_MAX_PIXELS = 1_000_000;
+export const BOX_QUALITY = 0.7;
+
+/** Encode budget for one tick. Defaults are the identify (evidence) values. */
+export type EncodeOptions = {
+  maxPixels?: number;
+  quality?: number;
+};
+
 /** Pause the sampling loop. Named because the loop awaits it in three places. */
 export function sleep(ms: number): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>();
@@ -75,12 +94,14 @@ export type Frame = {
 };
 
 /**
- * Encode the video's current frame once, at the working resolution.
+ * Encode the video's current frame once, at the requested resolution.
  *
- * The advisory match and the stored evidence MUST be the same pixels: two
- * encodes at two resolutions let the overlay draw a face as quality-passing
- * and the stored crop then fail the same gate, which is the UI promising
- * something the evidence path cannot honour.
+ * An identify tick MUST encode at the evidence budget, because the frame it
+ * matches is the frame a click stores: two encodes at two resolutions let the
+ * overlay draw a face as quality-passing and the stored crop then fail the
+ * same gate, which is the UI promising something the evidence path cannot
+ * honour. A boxes-only tick is never stored, so it is free to be cheap — and
+ * `LiveView` only ever retains identify frames for exactly that reason.
  *
  * The canvas is passed in and reused for every tick: allocating one per frame
  * at 3 fps would churn a few hundred MB of backing store a minute.
@@ -88,7 +109,10 @@ export type Frame = {
 export async function encodeFrame(
   video: HTMLVideoElement,
   canvas: OffscreenCanvas,
+  options: EncodeOptions = {},
 ): Promise<Frame | null> {
+  const maxPixels = options.maxPixels ?? FRAME_MAX_PIXELS;
+  const quality = options.quality ?? FRAME_QUALITY;
   const sourceWidth = video.videoWidth;
   const sourceHeight = video.videoHeight;
   if (sourceWidth === 0 || sourceHeight === 0) {
@@ -100,7 +124,7 @@ export async function encodeFrame(
   }
   // Area, not long edge: cost tracks pixels, and a two-monitor surface is wide
   // rather than tall.
-  const scale = Math.min(1, Math.sqrt(FRAME_MAX_PIXELS / (sourceWidth * sourceHeight)));
+  const scale = Math.min(1, Math.sqrt(maxPixels / (sourceWidth * sourceHeight)));
   const width = Math.max(1, Math.round(sourceWidth * scale));
   const height = Math.max(1, Math.round(sourceHeight * scale));
   if (canvas.width !== width || canvas.height !== height) {
@@ -110,7 +134,7 @@ export async function encodeFrame(
   // Straight from the video: no intermediate bitmap to retain, because the
   // encoded blob itself is what a click stores.
   context.drawImage(video, 0, 0, width, height);
-  const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: FRAME_QUALITY });
+  const blob = await canvas.convertToBlob({ type: "image/jpeg", quality });
   return { blob, width, height, sourceWidth, sourceHeight };
 }
 
@@ -118,16 +142,23 @@ export async function encodeFrame(
  * Match one frame. `caseId` does not scope the gallery (persons and templates
  * are global); it is sent so a stale case id surfaces here as a 404 instead of
  * mattering nowhere.
+ *
+ * `identify: false` asks for boxes only: the backend detects and runs the
+ * quality gate, then stops. The response says which it was, in `identified`.
  */
 export async function matchFrame(
   frame: Frame,
   caseId: string,
   signal: AbortSignal,
+  options: { identify?: boolean } = {},
 ): Promise<LiveMatchResult> {
   const form = new FormData();
   form.set("frame", frame.blob, "frame.jpg");
   if (caseId !== "") {
     form.set("case_id", caseId);
+  }
+  if (options.identify === false) {
+    form.set("identify", "false");
   }
   return postForm<LiveMatchResult>("/api/live/match", form, signal);
 }
@@ -145,5 +176,7 @@ export async function matchFrame(
 export async function persistFrame(frame: Frame, caseId: string): Promise<MediaUpload> {
   const stamp = new Date().toISOString().replaceAll(/[:.]/g, "-").replace("Z", "");
   const file = new File([frame.blob], `live-${stamp}.jpg`, { type: "image/jpeg" });
-  return ingestFile(caseId, file, null);
+  // These pixels came off the operator's own display, not out of a file: the audit entry
+  // says so rather than calling a screen grab an upload.
+  return ingestFile(caseId, file, null, { mode: "screen_capture", captureMode: "screen" });
 }
