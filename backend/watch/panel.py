@@ -16,7 +16,7 @@ from collections import deque
 from datetime import UTC, datetime
 from time import monotonic
 
-from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtCore import QByteArray, QPoint, QSettings, Qt, Signal
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -51,6 +51,15 @@ MAX_ROWS = 8
 
 REGION_ITEM = "Region…"
 
+# The panel opens small and parked beside the watched window, not over it. The face list is
+# the only part that grows with the frame, so it starts collapsed and its state, along with
+# whatever size the operator drags the window to, is remembered across runs.
+COMPACT_SIZE = (360, 240)
+GEOMETRY_KEY = "panel/geometry"
+FACES_EXPANDED_KEY = "panel/faces_expanded"
+# The row is narrow; the case name only fits in the tooltip and the click menu.
+SAVE_BUTTON_TEXT = "Save & tag"
+
 NO_CASE_REFUSAL = "Select a case before saving a frame: evidence has to belong to one."
 NO_IDENTIFY_YET = "Waiting for the first identify pass — nothing is stored yet."
 NOT_IN_IDENTIFY = (
@@ -82,7 +91,7 @@ class Row:
         layout.setContentsMargins(0, 0, 0, 0)
         self.label = QLabel()
         self.label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self.button = QPushButton()
+        self.button = QPushButton(SAVE_BUTTON_TEXT)
         layout.addWidget(self.label)
         layout.addWidget(self.button)
         self.button.clicked.connect(on_save)
@@ -108,6 +117,7 @@ class Panel(QWidget):
 
         self.setWindowTitle("faceymatch watch")
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+        self._settings = QSettings()
         self._build(fps)
         self._overlay.picked.connect(self._on_picked)
         self._overlay.set_interactive(self._clickable.isChecked())
@@ -151,11 +161,12 @@ class Panel(QWidget):
         buttons.addWidget(self._stop)
         layout.addLayout(buttons)
 
-        self._clickable = QCheckBox("Click faces on the overlay")
+        self._clickable = QCheckBox("Click the numbered handles")
         self._clickable.setChecked(OVERLAY_CLICKS_DEFAULT)
         self._clickable.setToolTip(
-            "Boxes and labels take the click. Turn this off to click straight through to the "
-            "window underneath."
+            "Each face gets one small numbered square beside its box, and that square is the "
+            "only pixel the helper takes a click on. Turn this off and the overlay takes no "
+            "input at all."
         )
         self._clickable.toggled.connect(self._overlay.set_interactive)
         layout.addWidget(self._clickable)
@@ -165,15 +176,47 @@ class Panel(QWidget):
         layout.addWidget(self._status)
 
         faces = QGroupBox("Faces in frame")
-        self._faces_layout = QVBoxLayout(faces)
+        faces.setCheckable(True)
+        self._faces_group_layout = QVBoxLayout(faces)
+        self._faces_body = QWidget()
+        self._faces_layout = QVBoxLayout(self._faces_body)
+        self._faces_layout.setContentsMargins(0, 0, 0, 0)
         self._empty = QLabel("No frame yet.")
         self._faces_layout.addWidget(self._empty)
         self._rows = [Row(i, _saver(self, i)) for i in range(MAX_ROWS)]
         for row in self._rows:
             self._faces_layout.addWidget(row.widget)
+        self._faces_group_layout.addWidget(self._faces_body)
+        faces.toggled.connect(self._on_faces_toggled)
         layout.addWidget(faces)
 
-        self.resize(560, 420)
+        # Restoring is not an operator toggle: the slot would post a resize that overrides
+        # the geometry being restored two lines below it.
+        expanded = bool(self._settings.value(FACES_EXPANDED_KEY, False, type=bool))
+        faces.blockSignals(True)
+        faces.setChecked(expanded)
+        faces.blockSignals(False)
+        self._faces_body.setVisible(expanded)
+        saved = self._settings.value(GEOMETRY_KEY)
+        if not (isinstance(saved, QByteArray) and self.restoreGeometry(saved)):
+            self.resize(*COMPACT_SIZE)
+
+    def _on_faces_toggled(self, expanded: bool) -> None:
+        """Show or hide the face list, then take the window back to what is left of it.
+
+        Hiding a widget only posts a layout request, so both layouts between it and the
+        window still answer with the height they had a moment ago (measured). They are
+        invalidated here rather than the resize deferred to a timer, because a window that
+        flashes at its old height and then jumps is worse than one that does not move.
+        """
+        self._faces_body.setVisible(expanded)
+        self._settings.setValue(FACES_EXPANDED_KEY, expanded)
+        for layout in (self._faces_group_layout, self.layout()):
+            if layout is not None:
+                layout.invalidate()
+                layout.activate()
+        # Height only: the width the operator dragged the window to is theirs.
+        self.resize(self.width(), self.sizeHint().height())
 
     # ------------------------------------------------------------- population
 
@@ -250,7 +293,7 @@ class Panel(QWidget):
     def _on_case_changed(self) -> None:
         self._case_name = self._cases.currentText() if self._case_id() else ""
         for row in self._rows:
-            row.button.setText(self._button_text())
+            row.button.setToolTip(self._button_text())
 
     def _on_target_chosen(self, index: int) -> None:
         if index < 0 or index >= len(self._targets):
@@ -380,7 +423,7 @@ class Panel(QWidget):
             face = faces[row.index]
             identity = self._identity_of[row.index] if row.index < len(self._identity_of) else None
             row.label.setText(_describe(face, identity))
-            row.button.setText(self._button_text())
+            row.button.setToolTip(self._button_text())
             row.widget.show()
 
     def _status_text(self, match: MatchResult) -> str:
@@ -388,8 +431,6 @@ class Panel(QWidget):
         if not match.auto_accept_allowed:
             reason = match.auto_accept_reason or "the active threshold set is not calibrated"
             parts.append(f"nothing self-confirms: {reason}")
-        if self._target is not None and self._target.kind == "window":
-            parts.append(OCCLUSION_NOTE)
         return " · ".join(parts)
 
     def _telemetry(self, match: MatchResult) -> list[str]:
@@ -499,6 +540,7 @@ class Panel(QWidget):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt's name
         self._session.stop()
+        self._settings.setValue(GEOMETRY_KEY, self.saveGeometry())
         self._overlay.finish()
         self._overlay.close()
         super().closeEvent(event)

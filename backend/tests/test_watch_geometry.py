@@ -15,6 +15,7 @@ from watch.geometry import (
     capture_size,
     chip_rect,
     frame_to_overlay,
+    handle_rect,
     identifies,
     normalized,
 )
@@ -108,3 +109,19 @@ def test_a_face_at_the_right_edge_keeps_its_whole_label_on_the_overlay() -> None
     chip = chip_rect(Rect(960.0, 200.0, 80.0, 80.0), (120.0, 18.0), (1000.0, 800.0), 4.0)
 
     assert chip.x + chip.w <= 1000.0
+
+
+def test_a_handle_sits_outside_the_box_and_inside_the_overlay() -> None:
+    """The handle is the only thing that takes a click, so it must not cover the face.
+
+    Outside the top-left corner normally; clamped at the overlay edge, which is the one case
+    where it lands on the box — a handle off the overlay is a handle nobody can press.
+    """
+    ordinary = handle_rect(Rect(100.0, 200.0, 80.0, 80.0), 18.0, 2.0, (1000.0, 800.0))
+    assert (ordinary.x, ordinary.y, ordinary.w, ordinary.h) == (80.0, 200.0, 18.0, 18.0)
+
+    at_edge = handle_rect(Rect(0.0, 0.0, 80.0, 80.0), 18.0, 2.0, (1000.0, 800.0))
+    assert (at_edge.x, at_edge.y) == (0.0, 0.0)
+
+    cramped = handle_rect(Rect(4.0, 4.0, 6.0, 6.0), 18.0, 2.0, (10.0, 10.0))
+    assert (cramped.x, cramped.y) == (0.0, 0.0)

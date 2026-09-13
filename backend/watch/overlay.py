@@ -4,12 +4,14 @@ Both are the same frameless translucent machinery, which is why they live togeth
 
 The drawing overlay takes no input at all: `WindowTransparentForInput` keeps the window server
 from ever offering it a click, so every pixel of the watched window stays reachable. What takes
-a click is one small transparent window per box, `HitWindow`, moved over the box and its label
-on every frame. That is the mechanism because a mask is not one: `setMask` clips this window's
-painting, but the window server still hands it every click inside its frame (measured), so a
-masked overlay would swallow clicks meant for the watched application. A window the window
-server knows about cannot be ambiguous that way, and turning clicks off is then just hiding
-those windows.
+a click is one small handle window per face, `HitWindow`, placed beside its box on every frame
+and drawn as a numbered square; the box, its label and the telemetry are pure paint. That is
+the mechanism because a mask is not one: `setMask` clips this window's painting, but the window
+server still hands it every click inside its frame (measured), so a masked overlay would
+swallow clicks meant for the watched application. Because the window server decides by window,
+the way to stop swallowing the watched application's clicks is to make the click surface small
+rather than to mask a large one: a hover-driven control under a box — a video player's
+auto-hiding bar — keeps working, and turning clicks off is then just hiding those windows.
 """
 
 from __future__ import annotations
@@ -35,6 +37,11 @@ from watch.config import (
     CHIP_BG_RGBA,
     CHIP_TEXT,
     FOLLOW_INTERVAL_MS,
+    HANDLE_ALPHA,
+    HANDLE_BORDER,
+    HANDLE_FONT_PT,
+    HANDLE_GAP,
+    HANDLE_PX,
     HUD_BG_RGBA,
     HUD_FONT_PT,
     HUD_LINE_GAP,
@@ -48,7 +55,7 @@ from watch.config import (
     OVERLAY_CLICKS_DEFAULT,
     OVERLAY_HIT_WINDOWS,
 )
-from watch.geometry import Rect, chip_rect, frame_to_overlay
+from watch.geometry import Rect, chip_rect, frame_to_overlay, handle_rect
 from watch.sources import CaptureBackend, Target
 
 BOX_WIDTH = 2
@@ -70,11 +77,12 @@ class Box:
 
 
 class HitWindow(QWidget):
-    """A transparent window over one box: the only thing in the helper that takes a click.
+    """A transparent window over one face's handle: the only thing that takes a click.
 
-    It draws nothing. Its whole frame is its input surface, which is exactly the point: the
-    window server decides by window, so a click inside is unambiguously a click on that face
-    and a click anywhere else was never ours to begin with.
+    It draws nothing itself — the overlay paints the numbered square underneath it. Its whole
+    frame is its input surface, which is exactly the point: the window server decides by
+    window, so a click inside is unambiguously a click on that face and a click anywhere else
+    was never ours to begin with.
     """
 
     pressed = Signal(int, QPoint)  # face index, global position of the click
@@ -105,7 +113,7 @@ class HitWindow(QWidget):
 
 
 class Overlay(QWidget):
-    """An always-on-top window sized to the target, with a clickable window per box."""
+    """An always-on-top window sized to the target, with one clickable handle per box."""
 
     picked = Signal(int, QPoint)  # face index, global position of the click
 
@@ -132,6 +140,8 @@ class Overlay(QWidget):
         self._label_font.setPointSize(LABEL_FONT_PT)
         self._hud_font = QFont()
         self._hud_font.setPointSize(HUD_FONT_PT)
+        self._handle_font = QFont()
+        self._handle_font.setPointSize(HANDLE_FONT_PT)
         self._interactive = OVERLAY_CLICKS_DEFAULT
         self._hits = [HitWindow(index) for index in range(OVERLAY_HIT_WINDOWS)]
         for window in self._hits:
@@ -175,24 +185,25 @@ class Overlay(QWidget):
         self.update()
 
     def set_interactive(self, interactive: bool) -> None:
-        """Whether the boxes and their labels take a click, or everything passes through."""
+        """Whether each face's handle takes a click, or the overlay takes no input at all."""
         self._interactive = interactive
+        self.update()  # the handles are drawn, so they vanish with the clicks
         self._sync_hits()
 
     # ---------------------------------------------------------------- layout
 
-    def _layout(self) -> tuple[list[tuple[Box, QRect, QRect]], QRect]:
-        """Each box as (box, box rect, chip rect) in overlay-local points, plus the HUD rect.
+    def _layout(self) -> tuple[list[tuple[Box, QRect, QRect, QRect]], QRect]:
+        """Each box as (box, box rect, chip rect, handle rect), plus the HUD rect.
 
-        The paint pass and the hit windows both read this, so what is drawn and what can be
-        clicked cannot drift apart.
+        All overlay-local points. The paint pass and the hit windows both read this, so what
+        is drawn and what can be clicked cannot drift apart.
         """
         frame_w, frame_h = self._frame
         if frame_w <= 0 or frame_h <= 0 or self._target.w <= 0:
             return [], QRect()
         bounds = (float(self.width()), float(self.height()))
         metrics = QFontMetrics(self._label_font)
-        laid: list[tuple[Box, QRect, QRect]] = []
+        laid: list[tuple[Box, QRect, QRect, QRect]] = []
         for box in self._boxes:
             local = frame_to_overlay(box.rect, frame_w, frame_h, self._target)
             size = (
@@ -200,7 +211,8 @@ class Overlay(QWidget):
                 float(metrics.height() + 2 * LABEL_PAD_Y),
             )
             chip = chip_rect(local, size, bounds, float(LABEL_GAP))
-            laid.append((box, _as_qrect(local), _as_qrect(chip)))
+            handle = handle_rect(local, float(HANDLE_PX), float(HANDLE_GAP), bounds)
+            laid.append((box, _as_qrect(local), _as_qrect(chip), _as_qrect(handle)))
         return laid, self._hud_rect()
 
     def _hud_rect(self) -> QRect:
@@ -213,12 +225,18 @@ class Overlay(QWidget):
         return QRect(HUD_MARGIN, HUD_MARGIN, width, height)
 
     def _sync_hits(self) -> None:
-        """Move one hit window onto each box, largest first so the smallest ends up on top.
+        """Move one hit window onto each face's handle, largest box first.
 
-        Nested detections are the reason for the order: a face found inside a larger box has
-        to stay reachable, and with one window per box that is z-order rather than arithmetic.
+        Largest first so the smallest ends up on top: nested detections can put two handles
+        in the same place, and with one window per box that is z-order rather than arithmetic.
         Beyond the pool the boxes are still drawn and still named in the panel; only the
         click is capped, for the same reason the panel lists eight faces and no more.
+
+        `_layout` is overlay-local because that is what the paint pass needs; a hit window is
+        a top-level window, so its geometry is read in screen coordinates. Mapping here is
+        load-bearing: an unmapped rect puts an invisible click target at the watched window's
+        offset from the screen origin, which is a click the watched application never gets
+        and nowhere near the face it was meant for.
         """
         if not self._interactive:
             self._hide_hits(0)
@@ -226,12 +244,16 @@ class Overlay(QWidget):
         boxes, _hud = self._layout()
         order = sorted(boxes, key=lambda laid: -laid[1].width() * laid[1].height())
         used = 0
-        for box, box_rect, chip in order[: len(self._hits)]:
-            # The label belongs to the face it names, so it takes the click too. One window
-            # over their union: the gap between them is a few points of dead space at worst.
-            self._hits[used].place(box.index, box_rect.united(chip))
+        for box, _box_rect, _chip, handle in order[: len(self._hits)]:
+            # Only the handle. The box and its label are paint, so a click on either reaches
+            # the watched application like any other pixel the overlay merely draws on.
+            self._hits[used].place(box.index, self._to_screen(handle))
             used += 1
         self._hide_hits(used)
+
+    def _to_screen(self, rect: QRect) -> QRect:
+        """An overlay-local rect in the screen coordinates a top-level window is placed in."""
+        return QRect(self.mapToGlobal(rect.topLeft()), rect.size())
 
     def _hide_hits(self, first: int) -> None:
         for window in self._hits[first:]:
@@ -247,13 +269,16 @@ class Overlay(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         if not hud.isEmpty():
             self._paint_hud(painter, hud)
-        for box, box_rect, chip in boxes:
+        for box, box_rect, chip, handle in boxes:
             pen = QPen(QColor(box.color))
             pen.setWidth(BOX_WIDTH)
             pen.setStyle(Qt.PenStyle.SolidLine if box.solid else Qt.PenStyle.DashLine)
             painter.setPen(pen)
             painter.drawRect(box_rect)
             self._paint_chip(painter, chip, box)
+            if self._interactive:
+                # Off means the overlay takes no input, so the handle must not advertise one.
+                self._paint_handle(painter, handle, box)
         painter.end()
 
     def _paint_hud(self, painter: QPainter, rect: QRect) -> None:
@@ -279,6 +304,19 @@ class Overlay(QWidget):
         painter.setFont(self._label_font)
         painter.setPen(QPen(QColor(CHIP_TEXT)))
         painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), box.label)
+
+    def _paint_handle(self, painter: QPainter, rect: QRect, box: Box) -> None:
+        """The one clickable square for this face, numbered to match its panel row."""
+        fill = QColor(box.color)
+        fill.setAlpha(HANDLE_ALPHA)
+        painter.fillRect(rect, fill)
+        border = QPen(QColor(HANDLE_BORDER))
+        border.setWidth(1)
+        painter.setPen(border)
+        painter.drawRect(rect.adjusted(0, 0, -1, -1))
+        painter.setFont(self._handle_font)
+        painter.setPen(QPen(QColor(CHIP_TEXT)))
+        painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), str(box.index + 1))
 
     # -------------------------------------------------------------- position
 

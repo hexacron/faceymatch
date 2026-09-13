@@ -51,6 +51,15 @@ LABEL_GAP = 4  # points between a chip and the box edge it labels
 CHIP_BG_RGBA = (18, 22, 28, 208)
 CHIP_TEXT = "#e6e9ee"
 
+# The overlay's only input surface: one square per face, outside its top-left corner. Boxes
+# and chips take no clicks at all, so hover-driven controls in the watched window (a video
+# player's auto-hiding bar) keep working while the helper draws over them.
+HANDLE_PX = 18
+HANDLE_GAP = 2
+HANDLE_FONT_PT = 9
+HANDLE_BORDER = "#12161c"
+HANDLE_ALPHA = 208
+
 HUD_FONT_PT = 10
 HUD_PAD = 8
 HUD_MARGIN = 10

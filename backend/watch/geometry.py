@@ -75,6 +75,18 @@ def chip_rect(
     return Rect(x, y, size[0], size[1])
 
 
+def handle_rect(box: Rect, size: float, gap: float, bounds: tuple[float, float]) -> Rect:
+    """Where the one clickable handle for `box` sits, kept inside `bounds` (w, h).
+
+    Outside the box's top-left corner, so the handle covers neither the face nor the pixels
+    of the watched window the box frames. Clamped into `bounds`, which is the only case where
+    it can land on the box: a face against the overlay's own edge.
+    """
+    x = min(max(box.x - size - gap, 0.0), max(bounds[0] - size, 0.0))
+    y = min(max(box.y, 0.0), max(bounds[1] - size, 0.0))
+    return Rect(x, y, size, size)
+
+
 def normalized(box: Rect, frame_w: int, frame_h: int) -> Rect:
     """A box as fractions of its frame — the form the `#/media/{id}/box/...` hash takes."""
     if frame_w <= 0 or frame_h <= 0:

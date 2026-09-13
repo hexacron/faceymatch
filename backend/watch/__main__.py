@@ -6,6 +6,11 @@ The two things that can be wrong before a window is ever drawn — no capture ba
 platform, and no backend answering on loopback — are checked first and reported as a
 sentence, because a traceback from inside Qt tells the operator nothing they can act on. The
 capture self-test runs on Start instead: it needs a target.
+
+The Qt application is named here because the panel remembers its own size and whether its
+face list is expanded (`QSettings`), and an unnamed application would key that off the
+executable name. That is the only thing the helper writes outside `data/logs/watch.log`: a
+window rectangle and one boolean in the platform settings store, never biometric material.
 """
 
 from __future__ import annotations
@@ -45,6 +50,8 @@ def main(argv: list[str] | None = None) -> int:
     from PySide6.QtWidgets import QApplication
 
     app = QApplication([])
+    app.setOrganizationName("faceymatch")
+    app.setApplicationName("watch")
     panel = Panel(client, backend, fps=args.fps)
     panel.show()
     # `./run --watch` redirects this to data/logs/watch.log, where stdout is block-buffered:
