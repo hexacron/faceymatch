@@ -66,7 +66,7 @@ class Box:
     color: str
     solid: bool  # dashed when the quality gate rejected the face, as the web overlay draws
     index: int  # this face's position in the result, so a click can name it
-    label: str  # "Robert Downey Jr · 90%" | "no match" | "identifying…" | "quality gate: …"
+    label: str  # "Robert Downey Jr · 90%" | "no match" | "identifying…" | "too small"
 
 
 class HitWindow(QWidget):

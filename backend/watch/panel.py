@@ -530,12 +530,31 @@ def _describe(face: Face, identity: Face | None) -> str:
     return f"{top.name} · {top.band} · {top.score:.3f}"
 
 
+# The chip is drawn over the operator's own screen, inches from the next face and its own
+# chip, so a rejection has to read in a glance and in as little width as the box it labels:
+# "quality gate: width_below_min_embed_px" is wider than most faces and buries its
+# neighbours. The panel row and the click menu have a column to themselves, so they keep the
+# exact reason (see `_describe`) and this is the only place the wording is shortened. Keys are
+# every reason `app.pipeline.quality` can emit; they arrive over HTTP as plain strings, which
+# is why they are restated here rather than imported.
+CHIP_REASON_PHRASE: dict[str, str] = {
+    "width_below_min_embed_px": "too small",
+    "yaw_above_max": "turned away",
+    "sharpness_below_min": "blurred",
+    "det_score_below_min": "uncertain",
+}
+
+# A reason this build does not know is still a refusal, and saying so beats printing an
+# identifier at the operator.
+CHIP_REASON_FALLBACK = "low quality"
+
+
 def _chip_text(face: Face, identity: Face | None) -> str:
     """The box's own caption. Short, and read off the pass that decided it (see `_describe`)."""
     verdict = identity if identity is not None else face
     if not verdict.quality_passed:
-        reason = verdict.quality_reasons[0] if verdict.quality_reasons else "rejected"
-        return f"quality gate: {reason}"
+        reason = verdict.quality_reasons[0] if verdict.quality_reasons else ""
+        return CHIP_REASON_PHRASE.get(reason, CHIP_REASON_FALLBACK)
     if identity is None:
         return "identifying…"
     if not identity.candidates:
