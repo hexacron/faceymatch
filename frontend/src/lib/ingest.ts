@@ -19,7 +19,9 @@ import type {
   CaptureMode,
   CaptureRequest,
   CaptureStatus,
+  FolderEnroll,
   Health,
+  MediaImport,
   MediaUpload,
 } from "../api/types";
 import { truncateHash } from "./display";
@@ -279,6 +281,28 @@ export async function ingestFile(
     form.set("capture_mode", acquisition.captureMode);
   }
   return postForm<MediaUpload>("/api/media", form);
+}
+
+/**
+ * The two folder paths, kept here with every other ingest request.
+ *
+ * Neither touches the notice stack: both return a report worth reading, which
+ * the folder panel renders itself rather than flattening to one line.
+ */
+export async function importFolder(caseId: string, folderPath: string): Promise<MediaImport> {
+  return postJson<MediaImport>("/api/media/import", { case_id: caseId, folder_path: folderPath });
+}
+
+export async function enrollFolder(
+  caseId: string,
+  folderPath: string,
+  reason: string,
+): Promise<FolderEnroll> {
+  return postJson<FolderEnroll>("/api/persons/enroll_folder", {
+    case_id: caseId,
+    folder_path: folderPath,
+    reason,
+  });
 }
 
 /**

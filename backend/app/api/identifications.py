@@ -12,7 +12,7 @@ from app.api.deps import ConnDep, SettingsDep
 from app.config import Settings
 from app.core.types import Decision
 from app.db.conn import transaction
-from app.enrollment import EnrollmentError, create_template_from_detection
+from app.enrollment import EnrollmentError, create_person, create_template_from_detection
 from app.ids import new_id
 from app.jobs import enqueue
 
@@ -97,26 +97,15 @@ def apply_decision(
     template_created = False
     with transaction(conn):
         if body.decision == "new":
-            person_id = new_id()
-            conn.execute(
-                "INSERT INTO persons (id, display_name, status, enrolled_in_case_id, "
-                "created_at, created_by) VALUES (?, ?, 'unenrolled', ?, ?, ?)",
-                (
-                    person_id,
-                    body.new_name,
-                    str(track["case_id"]),
-                    now,
-                    settings.operator_name,
-                ),
-            )
-            audit.append(
+            person_id = create_person(
                 conn,
-                actor=settings.operator_name,
+                display_name=str(body.new_name),
                 case_id=str(track["case_id"]),
-                action="person.create",
-                object_type="person",
-                object_id=person_id,
-                payload={"display_name": body.new_name, "from_track_id": body.track_id},
+                actor=settings.operator_name,
+                audit_payload={
+                    "display_name": body.new_name,
+                    "from_track_id": body.track_id,
+                },
             )
         elif person_id is not None:
             person = conn.execute("SELECT 1 FROM persons WHERE id = ?", (person_id,)).fetchone()

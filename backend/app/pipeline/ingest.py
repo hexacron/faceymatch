@@ -188,7 +188,7 @@ def ingest_folder(
     require_case(conn, case_id)
 
     results: list[IngestResult] = []
-    for path in _walk_supported(folder):
+    for path in walk_supported(folder):
         try:
             results.append(
                 ingest_file(
@@ -214,10 +214,16 @@ def ingest_folder(
     return results
 
 
-def _walk_supported(folder: Path) -> Iterator[Path]:
-    """Yield decodable files in a stable order, so a resumed import is reproducible."""
+def walk_supported(folder: Path) -> Iterator[Path]:
+    """Yield ingestible files in a stable order, so a resumed import is reproducible.
+
+    Public because bulk enrolment (`app.enroll_folder`) walks the same tree and has to see
+    exactly the files the import registered, in the same order.
+    """
     for path in sorted(folder.rglob("*")):
-        if path.is_file() and decode.is_supported_image(path):
+        if path.is_file() and (
+            decode.is_supported_image(path) or video.is_supported_video(path)
+        ):
             yield path
 
 

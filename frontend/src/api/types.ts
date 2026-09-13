@@ -214,6 +214,54 @@ export type MediaImport = {
   reused: number;
 };
 
+/** `DELETE /api/media/{id}` — what the purge removed (spec 12). */
+export type MediaPurgeResult = {
+  media_id: string;
+  detections: number;
+  tracks: number;
+  templates: number;
+  identities: number;
+  identifications: number;
+  matches: number;
+  persons_unenrolled: number;
+  /** False when the same bytes are still in another case: one object, many cases. */
+  object_removed: boolean;
+  crops_removed: number;
+  /** Null exactly when no template went, so the gallery did not change. */
+  rematch_job_id: string | null;
+};
+
+/** `POST /api/media/bulk_delete` — one operator action over a selection. */
+export type MediaBulkDelete = {
+  deleted: string[];
+  errors: { media_id: string; error: string }[];
+  detections: number;
+  tracks: number;
+  templates: number;
+  persons_unenrolled: number;
+  objects_removed: number;
+  /** Null exactly when no template went, so the gallery did not change. */
+  rematch_job_id: string | null;
+};
+
+/** `POST /api/persons/enroll_folder` — one person per immediate subfolder. */
+export type FolderEnrollPerson = {
+  display_name: string;
+  person_id: string;
+  created: boolean;
+  templates_created: number;
+};
+
+export type FolderEnrollSkip = { file: string; reason: string };
+
+export type FolderEnroll = {
+  persons: FolderEnrollPerson[];
+  templates_created: number;
+  skipped: FolderEnrollSkip[];
+  files_seen: number;
+  rematch_job_id: string | null;
+};
+
 /* ----------------------------------------------------------------- capture */
 
 /** What the host screen-capture tool is asked to grab. */

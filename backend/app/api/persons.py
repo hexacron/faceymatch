@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -12,15 +13,17 @@ from app import audit
 from app.api.deps import ConnDep, SettingsDep
 from app.core.types import Band, IdentitySource, PersonStatus, TemplateStatus
 from app.db.conn import transaction
+from app.enroll_folder import AmbiguousPersonError, enroll_folder
 from app.enrollment import (
     EnrollmentError,
     TemplateAlreadyRevokedError,
     TemplateNotFoundError,
+    create_person,
     create_template_from_detection,
     revoke_template,
 )
-from app.ids import new_id
 from app.jobs import enqueue
+from app.pipeline.ingest import CaseNotFoundError
 from app.purge import PersonNotFoundError, purge_person
 
 router = APIRouter(prefix="/api/persons", tags=["persons"])
@@ -51,6 +54,34 @@ class PersonListOut(BaseModel):
 
 class TemplateCreate(BaseModel):
     detection_id: str = Field(min_length=1)
+
+
+class FolderEnrollIn(BaseModel):
+    case_id: str = Field(min_length=1)
+    folder_path: str = Field(min_length=1)
+    # Required, unlike the optional reasons elsewhere: this creates gallery templates in
+    # bulk, and the reason is the record of why this folder was treated as identified faces.
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class FolderEnrollPersonOut(BaseModel):
+    display_name: str
+    person_id: str
+    created: bool
+    templates_created: int
+
+
+class FolderEnrollSkipOut(BaseModel):
+    file: str
+    reason: str
+
+
+class FolderEnrollOut(BaseModel):
+    persons: list[FolderEnrollPersonOut]
+    templates_created: int
+    skipped: list[FolderEnrollSkipOut]
+    files_seen: int
+    rematch_job_id: str | None
 
 
 class TemplateRevoke(BaseModel):
@@ -151,22 +182,22 @@ def list_persons(
 
 
 @router.post("", response_model=PersonOut, status_code=status.HTTP_201_CREATED)
-def create_person(body: PersonCreate, conn: ConnDep, settings: SettingsDep) -> PersonOut:
-    person_id = new_id()
-    now = audit.now_ts()
+def create_person_endpoint(body: PersonCreate, conn: ConnDep, settings: SettingsDep) -> PersonOut:
     with transaction(conn):
-        conn.execute(
-            "INSERT INTO persons (id, display_name, notes, status, created_at, created_by) "
-            "VALUES (?, ?, ?, 'unenrolled', ?, ?)",
-            (person_id, body.display_name, body.notes, now, settings.operator_name),
-        )
-        audit.append(
+        person_id = create_person(
             conn,
+            display_name=body.display_name,
+            notes=body.notes,
             actor=settings.operator_name,
-            action="person.create",
-            object_type="person",
-            object_id=person_id,
-            payload={"display_name": body.display_name, "notes": body.notes},
+            audit_payload={"display_name": body.display_name, "notes": body.notes},
+        )
+        # Read the stored timestamp back rather than keeping a second copy of it: the helper
+        # owns the row, and the response must not report a `created_at` the table disagrees
+        # with. One extra read on a path that runs once per person.
+        created_at = str(
+            conn.execute(
+                "SELECT created_at FROM persons WHERE id = ?", (person_id,)
+            ).fetchone()["created_at"]
         )
     return PersonOut(
         id=person_id,
@@ -176,8 +207,69 @@ def create_person(body: PersonCreate, conn: ConnDep, settings: SettingsDep) -> P
         status="unenrolled",
         template_count=0,
         crop_sha256=None,
-        created_at=now,
+        created_at=created_at,
         created_by=settings.operator_name,
+    )
+
+
+@router.post("/enroll_folder", response_model=FolderEnrollOut)
+def enroll_from_folder(
+    body: FolderEnrollIn, conn: ConnDep, settings: SettingsDep
+) -> FolderEnrollOut:
+    """Enrol a curated `Person Name/*.jpg` tree that is already imported (spec 6.6).
+
+    Two operator actions, not one: templates can only come from stored detections, so the
+    worker has to have processed the media first. This request reads those detections and
+    never the pixels on disk (invariant 13).
+    """
+    folder = Path(body.folder_path).expanduser()
+    try:
+        result = enroll_folder(
+            conn,
+            settings,
+            case_id=body.case_id,
+            folder=folder,
+            actor=settings.operator_name,
+            reason=body.reason,
+        )
+    except CaseNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except (NotADirectoryError, FileNotFoundError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=f"not a readable folder: {folder}"
+        ) from exc
+    except AmbiguousPersonError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"more than one person is named {exc}; rename one or enrol that folder by hand",
+        ) from exc
+
+    rematch_job_id: str | None = None
+    if result.templates_created > 0:
+        # After the call, never inside it: `enqueue` opens its own transaction.
+        rematch_job_id = enqueue(
+            conn,
+            kind="rematch",
+            actor=settings.operator_name,
+            params={"reason": "folder_enrollment", "folder": body.folder_path},
+            case_id=body.case_id,
+        ).id
+    return FolderEnrollOut(
+        persons=[
+            FolderEnrollPersonOut(
+                display_name=person.display_name,
+                person_id=person.person_id,
+                created=person.created,
+                templates_created=person.templates_created,
+            )
+            for person in result.persons
+        ],
+        templates_created=result.templates_created,
+        skipped=[
+            FolderEnrollSkipOut(file=skip.file, reason=skip.reason) for skip in result.skipped
+        ],
+        files_seen=result.files_seen,
+        rematch_job_id=rematch_job_id,
     )
 
 

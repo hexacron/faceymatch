@@ -250,6 +250,8 @@ Rules:
 ### 6.6 Enrollment and tagging
 
 - Enroll from an uploaded image, a stored detection, or a whole cluster.
+- A folder tree already imported through `POST /api/media/import` can be enrolled in one request: one person per immediate subfolder, named verbatim by that folder, with one template per image from the detection already stored for it. It is an operator action with a required reason, it hashes each file to find the media row those bytes were registered as, and it creates nothing from pixels that were never ingested (invariant 13).
+- That request refuses to guess, and says so per file: a file loose in the root has no person folder, an image with more than one embeddable face does not say which face is the subject, a folder name that already belongs to two persons is not a decidable target (the whole request stops there), and a person marked `do_not_enroll` is skipped. Everything else in the folder still enrols, and a second run over the same folder creates nothing.
 - Target 5 or more templates per person across pose and lighting.
 - Only operator actions create templates (C6). Auto-accepted tracks never become templates.
 - Tag actions on any track: confirm, reject, reassign, create new person, mark "do not enroll".
@@ -424,6 +426,18 @@ POST   /api/watch/launch               no body -> {pid, log_path}. Starts the wa
 GET    /api/media?status=
 GET    /api/media/{id}
 GET    /api/media/{id}/file            range requests for video
+GET    /api/media/{id}/thumbnail?size= derived JPEG preview: a downscale for an image, the
+                                       first decodable frame for a video. ETag on the source
+                                       digest; 410 when the object is missing from the store,
+                                       415 when it will not decode (6.1)
+DELETE /api/media/{id}                 purge one file (section 12). No body; 404 when it is
+                                       already gone
+  resp: {media_id, detections, tracks, templates, identities, identifications,
+         matches, persons_unenrolled, object_removed, crops_removed, rematch_job_id}
+POST   /api/media/bulk_delete          {media_ids[]} -> {deleted[], errors[], detections,
+                                       tracks, templates, persons_unenrolled,
+                                       objects_removed, rematch_job_id}. One purge per
+                                       file; a file already gone is reported, not fatal
 GET    /api/media/{id}/tracks?from_ms=&to_ms=
   resp: [{track_id, person_id, name, band, score, source,
           samples: [{t_ms, x, y, w, h}]}]
@@ -532,6 +546,7 @@ A measurement is only comparable against another run of that script on the same 
 - The global gallery removes case compartments. Any enrolled person can match in any case. Record the enrolling case and its `authorization_basis` on each person.
 - Case purge removes the case media, crops, detections, tracks, and all templates sourced from that case. Then it re-matches affected persons in other cases.
 - A case purge that strands a person at zero active templates sets `persons.status = 'unenrolled'`. The person row survives, so audit and identification history stay readable. An `unenrolled` person is excluded from matching, and the following re-match reverts that person's auto-accepted identities to unknown. Operator-confirmed identities survive (invariant 5).
+- Media purge (`DELETE /api/media/{id}`) is case purge at file granularity, and removes the same classes of row: the media, its detections and their stored crops, its tracks, and every template enrolled from one of its faces, plus the identities, identifications and matches that rest on either. A person left at zero active templates becomes `unenrolled` exactly as a case purge leaves them, and an operator decision on another file keeps its person and loses only the match it was scored against (invariant 5). The stored object and each crop are content-addressed and may belong to more than one case, so they are unlinked only once no row anywhere still points at them. The response reports what went, including whether the bytes were removed. A delete that removed a template queues a re-match; one that removed none leaves the gallery, and therefore every stored score, exactly as it was.
 - Person purge (`DELETE /api/persons/{id}`) removes the person, all their templates — revoked ones included — and every identity, identification and match naming them, in every case. It does not touch the evidence those claims were made from: the media, the detections and the stored crops stay, because they record what was in the picture rather than who it was. Re-processing the same file afterwards finds the same faces and names nobody, which is the correct end state. A cluster labelled with the person keeps its membership and loses the label.
 - A purge is irreversible, and the guard is a single confirm click on the bin icon in the persons library — not a typed name and not a written justification. A form that has to be argued with gets clicked through rather than read, and the operator clearing their own gallery is the ordinary case rather than the dangerous one. The purge queues a re-match, since the gallery it removed a person from is the one every stored auto score was measured against. Deleting a person who is already gone is a 404 that writes nothing.
 - The audit log keeps purge entries with hashes only. A `person.purge` entry carries the person id, the counts of what was removed, and the SHA-256 of the display name — never the name. A log that reprints the personal data it just deleted has not deleted it.

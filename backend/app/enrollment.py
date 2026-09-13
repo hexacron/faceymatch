@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from typing import Any
 
 from app import audit
 from app.ids import new_id
@@ -30,6 +31,43 @@ class TemplateNotFoundError(LookupError):
 
 class TemplateAlreadyRevokedError(ValueError):
     """The template is already revoked, and revocation is one-way."""
+
+
+def create_person(
+    conn: sqlite3.Connection,
+    *,
+    display_name: str,
+    notes: str | None = None,
+    case_id: str | None = None,
+    actor: str,
+    audit_payload: dict[str, Any],
+) -> str:
+    """Insert one person inside the caller's transaction and audit it. Returns the new id.
+
+    The one owner of the `persons` INSERT: every path that names a new face — an operator
+    typing a name, a `decision = "new"` on a track, a folder of curated images — records the
+    same row shape and the same `person.create` action.
+
+    `audit_payload` is passed through verbatim: each caller records what its own path knows
+    (the track, the folder, the notes), and this helper does not invent a shape for them.
+    """
+    person_id = new_id()
+    now = audit.now_ts()
+    conn.execute(
+        "INSERT INTO persons (id, display_name, notes, status, enrolled_in_case_id, "
+        "created_at, created_by) VALUES (?, ?, ?, 'unenrolled', ?, ?, ?)",
+        (person_id, display_name, notes, case_id, now, actor),
+    )
+    audit.append(
+        conn,
+        actor=actor,
+        case_id=case_id,
+        action="person.create",
+        object_type="person",
+        object_id=person_id,
+        payload=audit_payload,
+    )
+    return person_id
 
 
 def create_template_from_detection(
