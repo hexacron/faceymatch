@@ -27,7 +27,8 @@ from app.core import storage
 from app.core.types import Band, IdentitySource, MediaKind, MediaStatus
 from app.jobs import JobStatus
 from app.pipeline import decode
-from app.pipeline.ingest import CaseNotFoundError, ingest_file, ingest_folder
+from app.pipeline.capture import CaptureMode
+from app.pipeline.ingest import Acquisition, CaseNotFoundError, ingest_file, ingest_folder
 
 router = APIRouter(prefix="/api/media", tags=["media"])
 
@@ -123,8 +124,22 @@ def upload_media(
     case_id: Annotated[str, Form(min_length=1)],
     file: Annotated[UploadFile, File()],
     source_url: Annotated[str | None, Form()] = None,
+    acquisition: Annotated[Literal["upload", "screen_capture"], Form()] = "upload",
+    capture_mode: Annotated[CaptureMode | None, Form()] = None,
 ) -> MediaUploadOut:
-    """Multipart upload of one still image."""
+    """Multipart upload of one still image.
+
+    `acquisition` says how the client came by these bytes, because the audit entry cannot
+    tell an operator's file from a frame grabbed off their own screen by looking at the
+    pixels. `folder_import` is deliberately not accepted here: that mode belongs to
+    `POST /api/media/import` and nothing on the wire may claim it.
+    """
+    if acquisition == "upload" and capture_mode is not None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="capture_mode only applies to a screen_capture acquisition",
+        )
+
     filename = file.filename or ""
     try:
         suffix = decode.require_supported_image(filename)
@@ -137,7 +152,12 @@ def upload_media(
         staged = Path(tmpdir) / f"upload{suffix}"
         _spool(file, staged, limit=settings.max_upload_bytes)
         result = _ingest(
-            conn, settings, case_id=case_id, src=staged, source_url=source_url or None
+            conn,
+            settings,
+            case_id=case_id,
+            src=staged,
+            source_url=source_url or None,
+            acquisition=Acquisition(acquisition, capture_mode),
         )
     return MediaUploadOut(
         media_id=result.media_id,
@@ -410,6 +430,7 @@ def _ingest(
     case_id: str,
     src: Path,
     source_url: str | None,
+    acquisition: Acquisition,
 ) -> Any:
     try:
         return ingest_file(
@@ -419,6 +440,7 @@ def _ingest(
             src=src,
             source_url=source_url,
             actor=settings.operator_name,
+            acquisition=acquisition,
         )
     except CaseNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

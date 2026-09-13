@@ -152,6 +152,61 @@ def test_an_upload_records_its_own_acquisition_mode(
     assert payload["capture_mode"] is None
 
 
+def test_an_upload_can_declare_that_it_came_off_a_screen(
+    client: TestClient, conn: sqlite3.Connection
+) -> None:
+    """The watch helper ingests through `POST /api/media`, so the wire carries the mode.
+
+    Without this the audit log would call a screen frame an operator's file (spec 6.11).
+    """
+    case_id = _case(client)
+
+    uploaded = client.post(
+        "/api/media",
+        data={"case_id": case_id, "acquisition": "screen_capture", "capture_mode": "window"},
+        files={"file": ("watch.png", _screenshot(seed=11), "image/png")},
+    )
+    assert uploaded.status_code == 201
+
+    entry = conn.execute(
+        "SELECT payload_json FROM audit_log WHERE action = 'media.ingest' AND object_id = ?",
+        (uploaded.json()["media_id"],),
+    ).fetchone()
+    payload = json.loads(str(entry["payload_json"]))
+    assert payload["acquisition"] == "screen_capture"
+    assert payload["capture_mode"] == "window"
+
+
+def test_a_capture_mode_without_a_screen_capture_acquisition_is_refused(
+    client: TestClient, settings: Settings
+) -> None:
+    """An incoherent pair is refused before any bytes are spooled, not silently recorded."""
+    case_id = _case(client)
+
+    response = client.post(
+        "/api/media",
+        data={"case_id": case_id, "capture_mode": "window"},
+        files={"file": ("shot.png", _screenshot(seed=12), "image/png")},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "capture_mode only applies to a screen_capture acquisition"
+    assert [path for path in settings.media_dir.rglob("*") if path.is_file()] == []
+
+
+def test_an_upload_cannot_claim_the_folder_import_mode(client: TestClient) -> None:
+    """`folder_import` belongs to `POST /api/media/import`; nothing on the wire may claim it."""
+    case_id = _case(client)
+
+    response = client.post(
+        "/api/media",
+        data={"case_id": case_id, "acquisition": "folder_import"},
+        files={"file": ("shot.png", _screenshot(seed=13), "image/png")},
+    )
+
+    assert response.status_code == 422
+
+
 def test_modes_select_the_documented_screencapture_behaviour(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, on_macos: Path
 ) -> None:

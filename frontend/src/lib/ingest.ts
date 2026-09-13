@@ -261,6 +261,7 @@ export async function ingestFile(
   caseId: string,
   file: File,
   sourceUrl: string | null,
+  acquisition: { mode: "screen_capture"; captureMode: "screen" } | null = null,
 ): Promise<MediaUpload> {
   if (caseId === "") {
     throw new Error(noCaseRefusal("adding an image"));
@@ -270,6 +271,12 @@ export async function ingestFile(
   form.set("file", file, file.name);
   if (sourceUrl !== null && sourceUrl !== "") {
     form.set("source_url", sourceUrl);
+  }
+  // Left unset for an ordinary upload: the backend defaults to `upload` and refuses a
+  // capture_mode without a screen_capture acquisition.
+  if (acquisition !== null) {
+    form.set("acquisition", acquisition.mode);
+    form.set("capture_mode", acquisition.captureMode);
   }
   return postForm<MediaUpload>("/api/media", form);
 }
