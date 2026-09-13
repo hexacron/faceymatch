@@ -32,7 +32,10 @@ function CurrentView({ route }: { route: Route }) {
     case "persons":
       return <PersonsView />;
     case "person":
-      return <PersonDetailView personId={route.personId} />;
+      // Keyed on the id: the page holds state that is only true of one person —
+      // notably the terminal "deleted" panel — and reusing the instance for the
+      // next person would show them somebody else's outcome.
+      return <PersonDetailView key={route.personId} personId={route.personId} />;
     case "review":
       return <ReviewView />;
     case "status":

@@ -276,6 +276,12 @@ export type LiveMatchResult = {
   width: number;
   height: number;
   faces: LiveFace[];
+  /**
+   * Whether identification was requested for this frame. A boxes-only tick
+   * returns faces with empty `candidates`; without this flag that is
+   * indistinguishable from a gallery that matched nothing.
+   */
+  identified: boolean;
   /** Null when no threshold set is active. */
   threshold_set_id: string | null;
   /** The gate for the stored path; no live face is ever auto-accepted (C4). */
@@ -434,6 +440,28 @@ export type PersonCreate = {
 /** Body of `PATCH /api/persons/{person_id}`. */
 export type PersonUpdate = {
   do_not_enroll: boolean;
+};
+
+/**
+ * `DELETE /api/persons/{person_id}` (spec 12). Irreversible, no body.
+ *
+ * Deletes the person, their templates, and every identity, identification and
+ * match naming them, in every case. The evidence stays: media, detections and
+ * stored crops are the record of what was in the picture, not a claim about
+ * who it was. 404 when the person is already gone, which is a race rather than
+ * a failure.
+ *
+ * Answers with what it removed, plus the re-match it queued because the
+ * gallery shrank.
+ */
+export type PersonPurgeResult = {
+  person_id: string;
+  templates: number;
+  identities: number;
+  identifications: number;
+  matches: number;
+  clusters_unlabelled: number;
+  rematch_job_id: string;
 };
 
 export type Template = {

@@ -1,11 +1,17 @@
 import { useId, useState, type FormEvent } from "react";
 
-import { ApiError, errorMessage, patchJson, postJson } from "../api/client";
-import type { Person, PersonUpdate, Template, TemplateRevoke } from "../api/types";
+import { ApiError, deleteJson, errorMessage, patchJson, postJson } from "../api/client";
+import type {
+  Person,
+  PersonPurgeResult,
+  PersonUpdate,
+  Template,
+  TemplateRevoke,
+} from "../api/types";
 import { truncateHash } from "../lib/display";
 
 /**
- * The two ways an operator takes a face out of the matching gallery.
+ * The three ways an operator takes a face, or a person, out of the gallery.
  *
  * They are different acts and the copy has to keep them apart. Revoking is
  * about one template: that embedding stops being compared, which is the only
@@ -13,11 +19,13 @@ import { truncateHash } from "../lib/display";
  * match against it ties and the margin rule refuses to name either. Parking a
  * person (`do_not_enroll`) is about the person: no new template may be created
  * for them and they drop out of matching, but the templates they already have
- * stay exactly where they are.
+ * stay exactly where they are. Deleting a person is the only one that destroys
+ * anything: the person row and every claim naming them go, in every case.
  *
- * Neither hides anything. A revoked template keeps its row, its crop and its
- * place in the audit log; the log is append-only (invariant 6), so there is no
- * undo to offer and the confirm step says so instead of implying one.
+ * The first two hide nothing. A revoked template keeps its row, its crop and
+ * its place in the audit log; the log is append-only (invariant 6), so there is
+ * no undo to offer and the confirm step says so instead of implying one. The
+ * delete has no undo either, and one click stands between the operator and it.
  */
 
 /** An outcome the operator needs to read, rendered by the page that owns it. */
@@ -230,5 +238,86 @@ export function DoNotEnrollToggle({
         itself has to leave the gallery.
       </p>
     </div>
+  );
+}
+
+/**
+ * Delete a person from the library (spec 12).
+ *
+ * A bin icon that turns into "Delete / Cancel" for one click. No typed name,
+ * no written justification: this is the operator clearing their own gallery,
+ * and a form that has to be argued with gets clicked through rather than read.
+ * The audit entry is the record that it happened.
+ *
+ * It is still the only destructive act in the UI, so it says what it removes
+ * on the confirm step and the caller reloads the list afterwards rather than
+ * guessing at the new one.
+ */
+export function DeletePersonButton({
+  person,
+  onOutcome,
+  onDeleted,
+}: {
+  person: Person;
+  onOutcome: (notice: GalleryNotice) => void;
+  onDeleted: () => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  async function remove(): Promise<void> {
+    setBusy(true);
+    try {
+      const result = await deleteJson<PersonPurgeResult>(
+        `/api/persons/${encodeURIComponent(person.id)}`,
+      );
+      onOutcome({
+        tone: "success",
+        text: `${person.display_name} is deleted: ${String(result.templates)} template(s) and every identity, decision and match naming them went too. The media, detections and crops are kept.`,
+      });
+      onDeleted();
+    } catch (failure) {
+      if (failure instanceof ApiError && failure.status === 404) {
+        // The intended state is the actual state; another window got there first.
+        onDeleted();
+      } else {
+        onOutcome(failureNotice(`delete ${person.display_name}`, failure));
+      }
+    } finally {
+      setBusy(false);
+      setConfirming(false);
+    }
+  }
+
+  if (!confirming) {
+    return (
+      <button
+        type="button"
+        className="icon-button danger"
+        title={`Delete ${person.display_name}`}
+        aria-label={`Delete ${person.display_name}`}
+        onClick={() => setConfirming(true)}
+      >
+        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <path
+            d="M6 2h4v1h4v1.5H2V3h4V2zM3.5 6h9l-.7 8H4.2L3.5 6zM6.5 7.5v5M9.5 7.5v5"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.2"
+          />
+        </svg>
+      </button>
+    );
+  }
+
+  return (
+    <span className="delete-confirm">
+      <button type="button" className="danger" disabled={busy} onClick={() => void remove()}>
+        {busy ? "Deleting…" : "Delete"}
+      </button>
+      <button type="button" disabled={busy} onClick={() => setConfirming(false)}>
+        Cancel
+      </button>
+    </span>
   );
 }

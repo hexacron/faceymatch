@@ -21,6 +21,7 @@ from app.enrollment import (
 )
 from app.ids import new_id
 from app.jobs import enqueue
+from app.purge import PersonNotFoundError, purge_person
 
 router = APIRouter(prefix="/api/persons", tags=["persons"])
 
@@ -58,6 +59,17 @@ class TemplateRevoke(BaseModel):
 
 class PersonUpdate(BaseModel):
     do_not_enroll: bool
+
+
+class PersonPurgeOut(BaseModel):
+    person_id: str
+    templates: int
+    identities: int
+    identifications: int
+    matches: int
+    clusters_unlabelled: int
+    # The job the purge queued: the gallery shrank, so every stored auto score is stale.
+    rematch_job_id: str
 
 
 class TemplateOut(BaseModel):
@@ -344,6 +356,41 @@ def update_person(
         )
     row = conn.execute(_GET_PERSON, (person_id,)).fetchone()
     return _person_out(row)
+
+
+@router.delete("/{person_id}", response_model=PersonPurgeOut)
+def purge_person_endpoint(
+    person_id: str, conn: ConnDep, settings: SettingsDep
+) -> PersonPurgeOut:
+    """Delete a person and every claim that names them (spec 12). Irreversible.
+
+    Distinct from the two softer acts beside it. `do_not_enroll` parks a person and keeps
+    their templates; a template revoke withdraws one face and keeps the person. This
+    removes the person: their templates, the identities claiming them and the matches
+    scoring them, in every case. The evidence stays — media, detections and stored crops
+    are what was in the picture, not a claim about who it was — so re-processing the same
+    file afterwards finds the same faces and names nobody.
+
+    No confirmation payload: the UI confirms once, and the audit entry is the record that
+    it happened. A second person deleting the same row gets the 404, not an error state.
+    """
+    with transaction(conn):
+        try:
+            result = purge_person(conn, person_id=person_id, actor=settings.operator_name)
+        except PersonNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+            ) from exc
+    # The gallery shrank, so every stored auto identity scored against it is stale — the
+    # same reason a revoke queues one. Operator decisions on other people survive it
+    # (invariant 5).
+    job = enqueue(
+        conn,
+        kind="rematch",
+        actor=settings.operator_name,
+        params={"reason": "person_purged", "person_id": person_id},
+    )
+    return PersonPurgeOut(**result.as_json(), rematch_job_id=job.id)
 
 
 def _person_out(row: sqlite3.Row) -> PersonOut:

@@ -120,6 +120,19 @@ export async function patchJson<T>(
   return (await response.json()) as T;
 }
 
+/** DELETE, answering with the summary of what went. Used by the section 12 purges. */
+export async function deleteJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(path, {
+    method: "DELETE",
+    ...(signal === undefined ? {} : { signal }),
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) {
+    throw await failureFor(path, response);
+  }
+  return (await response.json()) as T;
+}
+
 export async function postForm<T>(
   path: string,
   form: FormData,

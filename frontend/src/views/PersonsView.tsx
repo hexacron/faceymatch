@@ -1,6 +1,7 @@
 import { useMemo, useState, type FormEvent } from "react";
 
 import type { Person, PersonList, PersonStatus } from "../api/types";
+import { DeletePersonButton, type GalleryNotice } from "../components/GalleryControls";
 import { GalleryState } from "../components/GalleryState";
 import { Loaded } from "../components/Loading";
 import { formatTs } from "../lib/display";
@@ -14,15 +15,26 @@ function countLabel(count: number): string {
 }
 
 /**
- * One face in the gallery.
+ * One face in the gallery, with the one destructive action beside it.
  *
  * The whole tile is the link, like the name cell in the table, so the target
  * is the face rather than a few characters of text. `crop_sha256` is null for
  * anyone with no active template, and a bundle older than that field sees
  * nothing there at all, so the placeholder is chosen on "is this a string"
  * rather than on a null check.
+ *
+ * The delete button sits outside the anchor rather than inside it: a button
+ * nested in a link is invalid, and clicking it must not also navigate.
  */
-function PersonCard({ person }: { person: Person }) {
+function PersonCard({
+  person,
+  onOutcome,
+  onDeleted,
+}: {
+  person: Person;
+  onOutcome: (notice: GalleryNotice) => void;
+  onDeleted: () => void;
+}) {
   const crop = person.crop_sha256;
   const label =
     `${person.display_name}: ` +
@@ -31,29 +43,34 @@ function PersonCard({ person }: { person: Person }) {
       : `${person.status}, ${String(person.template_count)} template${person.template_count === 1 ? "" : "s"}`) +
     (person.do_not_enroll ? ", do not enroll" : "");
   return (
-    <a
-      className="person-card"
-      href={hrefFor({ view: "person", personId: person.id })}
-      aria-label={label}
-    >
-      {typeof crop === "string" ? (
-        <img src={`/api/crops/${encodeURIComponent(crop)}`} alt={`Face crop for ${person.display_name}`} />
-      ) : (
-        <div className="crop-missing">No crop</div>
-      )}
-      <div className="person-card-body">
-        <strong>{person.display_name}</strong>
-        <div className="person-card-facts">
-          <GalleryState person={person} explain={false} />
-          <span className="muted">
-            {person.template_count === 0
-              ? "cannot be matched"
-              : `${String(person.template_count)} template${person.template_count === 1 ? "" : "s"}`}
-          </span>
-          {person.do_not_enroll && <span className="pill">do not enroll</span>}
+    <div className="person-tile">
+      <a
+        className="person-card"
+        href={hrefFor({ view: "person", personId: person.id })}
+        aria-label={label}
+      >
+        {typeof crop === "string" ? (
+          <img src={`/api/crops/${encodeURIComponent(crop)}`} alt={`Face crop for ${person.display_name}`} />
+        ) : (
+          <div className="crop-missing">No crop</div>
+        )}
+        <div className="person-card-body">
+          <strong>{person.display_name}</strong>
+          <div className="person-card-facts">
+            <GalleryState person={person} explain={false} />
+            <span className="muted">
+              {person.template_count === 0
+                ? "cannot be matched"
+                : `${String(person.template_count)} template${person.template_count === 1 ? "" : "s"}`}
+            </span>
+            {person.do_not_enroll && <span className="pill">do not enroll</span>}
+          </div>
         </div>
+      </a>
+      <div className="person-tile-actions">
+        <DeletePersonButton person={person} onOutcome={onOutcome} onDeleted={onDeleted} />
       </div>
-    </a>
+    </div>
   );
 }
 
@@ -74,6 +91,8 @@ export default function PersonsView() {
     return suffix === "" ? "/api/persons" : `/api/persons?${suffix}`;
   }, [query, status]);
   const persons = useResource<PersonList>(path);
+  /** The outcome of a delete, which is the only thing on this page that writes. */
+  const [notice, setNotice] = useState<GalleryNotice | null>(null);
 
   function search(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
@@ -114,6 +133,14 @@ export default function PersonsView() {
         </label>
         <button type="submit">Search</button>
       </form>
+      {notice !== null && (
+        <p
+          className={`notice ${notice.tone}`}
+          role={notice.tone === "error" ? "alert" : "status"}
+        >
+          {notice.text}
+        </p>
+      )}
       <Loaded state={persons.state} label="persons">
         {(list) =>
           list.items.length === 0 ? (
@@ -123,7 +150,12 @@ export default function PersonsView() {
               <p className="muted compact">{countLabel(list.items.length)}</p>
               <div className="person-grid">
                 {list.items.map((person) => (
-                  <PersonCard key={person.id} person={person} />
+                  <PersonCard
+                    key={person.id}
+                    person={person}
+                    onOutcome={setNotice}
+                    onDeleted={persons.reload}
+                  />
                 ))}
               </div>
             </>
@@ -138,6 +170,7 @@ export default function PersonsView() {
                     <th className="num">Templates</th>
                     <th>Created</th>
                     <th>Notes</th>
+                    <th aria-label="Actions" />
                   </tr>
                 </thead>
                 <tbody>
@@ -148,6 +181,13 @@ export default function PersonsView() {
                       <td className="num">{person.template_count}</td>
                       <td className="mono">{formatTs(person.created_at)}</td>
                       <td>{person.do_not_enroll ? <span className="pill">do not enroll</span> : (person.notes ?? "—")}</td>
+                      <td className="row-actions">
+                        <DeletePersonButton
+                          person={person}
+                          onOutcome={setNotice}
+                          onDeleted={persons.reload}
+                        />
+                      </td>
                     </tr>
                   ))}
                 </tbody>
