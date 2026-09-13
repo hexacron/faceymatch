@@ -41,7 +41,13 @@ ZOO = "https://github.com/opencv/opencv_zoo/raw/main/models"
 # models. Invariant 10 forbids attribute estimation outright, so only the recognition model
 # is extracted and the rest of the archive is discarded, never written to models/.
 BUFFALO_KEEP = "w600k_r50.onnx"
-BUFFALO_DISCARD = ("genderage.onnx", "1k3d68.onnx", "2d106det.onnx", "det_10g.onnx")
+BUFFALO_DETECTOR = "det_10g.onnx"
+# Age/gender and dense-landmark models are forbidden outright (invariant 10) and are never
+# written to models/. det_10g is the SCRFD-10GF detector and is now extracted (D4).
+BUFFALO_DISCARD = ("genderage.onnx", "1k3d68.onnx", "2d106det.onnx")
+# antelopev2 ships its own SCRFD copy; the detector comes from buffalo_l, which is already
+# fetched, so a build that only wants the detector needs one archive and not two.
+ANTELOPE_DISCARD = ("genderage.onnx", "1k3d68.onnx", "2d106det.onnx", "scrfd_10g_bnkps.onnx")
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +114,43 @@ SOURCES: tuple[Source, ...] = (
             "Lab prototype only (D2, C7). Loading it needs allow_noncommercial_models, "
             "an audited operator decision. "
             "Attribute models in the pack are discarded, never stored (invariant 10)."
+        ),
+    ),
+    Source(
+        id="buffalo_l-det_10g",
+        name="buffalo_l det_10g (SCRFD-10GF)",
+        version="v0.7",
+        kind="detector",
+        license="InsightFace model license: non-commercial research only",
+        license_url="https://github.com/deepinsight/insightface/tree/master/model_zoo",
+        commercial_use=False,
+        url="https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip",
+        filename="det_10g.onnx",
+        archive_member=BUFFALO_DETECTOR,
+        sha256="5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91",
+        discards=BUFFALO_DISCARD,
+        notes=(
+            "D4 SCRFD-10GF detector, 5 landmarks. Same pack and same licence as "
+            "w600k_r50: loading needs allow_noncommercial_models (C7, invariant 9)."
+        ),
+    ),
+    Source(
+        id="antelopev2-glintr100",
+        name="antelopev2 glintr100",
+        version="v0.7",
+        kind="embedder",
+        dim=512,
+        license="InsightFace model license: non-commercial research only",
+        license_url="https://github.com/deepinsight/insightface/tree/master/model_zoo",
+        commercial_use=False,
+        url="https://github.com/deepinsight/insightface/releases/download/v0.7/antelopev2.zip",
+        filename="glintr100.onnx",
+        archive_member="glintr100.onnx",
+        sha256="4ab1d6435d639628a6f3e5008dd4f929edf4c4124b1a7169e1048f9fef534cdf",
+        discards=ANTELOPE_DISCARD,
+        notes=(
+            "ArcFace R100, 512-d. Same preprocessing as w600k_r50, so it runs on the same "
+            "adapter. Non-commercial (C7); a switch re-embeds and needs recalibration."
         ),
     ),
 )

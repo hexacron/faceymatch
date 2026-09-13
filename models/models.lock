@@ -33,6 +33,27 @@
       "license": "InsightFace model license: non-commercial research only",
       "commercial_use": false,
       "dim": 512
+    },
+    {
+      "id": "buffalo_l-det_10g",
+      "name": "buffalo_l det_10g (SCRFD-10GF)",
+      "version": "v0.7",
+      "kind": "detector",
+      "file": "det_10g.onnx",
+      "sha256": "5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91",
+      "license": "InsightFace model license: non-commercial research only",
+      "commercial_use": false
+    },
+    {
+      "id": "antelopev2-glintr100",
+      "name": "antelopev2 glintr100",
+      "version": "v0.7",
+      "kind": "embedder",
+      "file": "glintr100.onnx",
+      "sha256": "4ab1d6435d639628a6f3e5008dd4f929edf4c4124b1a7169e1048f9fef534cdf",
+      "license": "InsightFace model license: non-commercial research only",
+      "commercial_use": false,
+      "dim": 512
     }
   ]
 }

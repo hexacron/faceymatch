@@ -1,8 +1,12 @@
 # Local Face Match System: Design Spec
 
-Version: 0.6
+Version: 0.7
 Owner: Brock
 Status: All core decisions closed. Proposed items can change during build.
+
+Changes from 0.6:
+
+- The SCRFD-10GF detector adapter (`buffalo_l-det_10g`, `app/adapters/scrfd.py`) and the ArcFace glintr100 embedder (`antelopev2-glintr100`, 512-d, on the same adapter as w600k_r50) land as gated options. Both come out of InsightFace packs the fetch tool already pins by digest, both are non-commercial, and both therefore load only once `allow_noncommercial_models` is on (C7, invariant 9). The shipped defaults do not move: a fresh clone still runs YuNet plus SFace and is still permissively licensed. Switching the embedder carries the usual consequences (re-embed, re-match, auto-accept closed until a threshold set calibrated for the new `model_id` is activated); switching the detector re-runs nothing on already-stored media.
 
 Changes from 0.5:
 
@@ -129,9 +133,9 @@ Out of scope for v1:
 | ID | Decision | Choice | Status | Reason |
 |----|----------|--------|--------|--------|
 | D1 | Input | Collected images and video files, plus screen acquisition on the operator workstation (D18) | Closed | No camera or sensor capture. The screen is not a new collection channel: the operator is already looking at those pixels. |
-| D2 | Recognition model | SFace (MIT) is the shipped default. buffalo_l (w600k_r50, 512-d) is opt-in behind `allow_noncommercial_models`, lab prototype only | Closed | A fresh clone starts permissively licensed. License or swap buffalo_l before product or case use (C7). Making the flag operator-settable (C7, 0.6) changed who records the decision and when; it did not change what the InsightFace licence permits, and this row is a statement about the licence. |
+| D2 | Recognition model | SFace (MIT) is the shipped default. buffalo_l (w600k_r50, 512-d) and antelopev2 glintr100 (ArcFace R100, 512-d) are opt-in behind `allow_noncommercial_models`, lab prototype only | Closed | A fresh clone starts permissively licensed. License or swap the InsightFace weights before product or case use (C7); glintr100 sits on the same licence footing as w600k_r50 and adds a stronger backbone, not a freer one. Making the flag operator-settable (C7, 0.6) changed who records the decision and when; it did not change what the InsightFace licence permits, and this row is a statement about the licence. |
 | D3 | Gallery scope | One global gallery across all cases | Closed | A person enrolled once is found in all media. |
-| D4 | Detector | YuNet (MIT). SCRFD-10GF adapter if licensed | Closed | Fast on CPU, 5 landmarks, permissive. |
+| D4 | Detector | YuNet (MIT) is the shipped default. SCRFD-10GF (`det_10g`) is implemented and selectable behind `allow_noncommercial_models` | Closed | YuNet is fast on CPU, 5 landmarks, permissive. SCRFD-10GF is the heavier, stronger option on the same 5-landmark contract, so it is a config change and not a code path (0.7). |
 | D5 | Where detection runs | Backend only | Closed | One code path, and the browser never runs a model. Screen frames are posted to the backend like any other pixels (6.10). |
 | D6 | Tracker | ByteTrack-lite in Python | Closed | Simple, robust to blur, no extra deps. |
 | D7 | Frontend | React + Vite + TypeScript, static build | Closed | Backend serves the build. No Node runtime in production. |
@@ -196,7 +200,7 @@ class Detector(Protocol):
     # Detection: bbox (x, y, w, h), score, landmarks (5x2)
 
 class Embedder(Protocol):
-    model_id: str          # e.g. "sface-2021dec" or "buffalo_l-w600k_r50"
+    model_id: str          # e.g. "sface-2021dec", "buffalo_l-w600k_r50", "antelopev2-glintr100"
     dim: int
     def embed(self, crops: np.ndarray) -> np.ndarray: ...
     # crops: (N, 112, 112, 3) aligned. Returns (N, dim), L2-normalized.
@@ -211,7 +215,8 @@ Rules:
 - The read path that reports whether a model *could* be selected (`GET /api/config`, `runtime_config.blocked_reason`) memoises digests on `(path, size, mtime_ns)`. Selection itself keeps the uncached hash: `PATCH /api/config` is the moment the bytes are proved, and a stat tuple is not proof.
 - `models.lock` records the license of each file. Refuse to load a non-commercial model unless `allow_noncommercial_models` is true (C7). That setting is an audited operator decision, not an environment-only flag: turning it on requires a reason and is recorded in the audit chain, and the license text stays visible in `GET /api/models`, `GET /api/config` and the C7 banner whether it is on or off. `models.lock` verification itself does not move (invariant 8) — unknown or SHA-mismatched weights are refused regardless of any setting, because that is integrity, not licensing.
 - Turning `allow_noncommercial_models` off while a non-commercial model is the active detector or embedder is refused (409), naming the active model and the remedy. Forcing the embedder back would re-embed the whole gallery as a side effect of a checkbox; one `PATCH` carrying both keys does it deliberately, with the ordinary model-switch consequences (6.2 re-embed, re-match, auto-accept off until recalibration).
-- SFace is the shipped default embedder. buffalo_l loads only once `allow_noncommercial_models` is turned on, so a fresh clone starts in a permissively licensed state.
+- SFace is the shipped default embedder. buffalo_l loads only once `allow_noncommercial_models` is turned on, so a fresh clone starts in a permissively licensed state. The same holds for glintr100 and for the SCRFD-10GF detector.
+- A detector must return five landmarks in the ArcFace order (`[right eye, left eye, nose, right mouth, left mouth]`, as `ARCFACE_TEMPLATE` is laid out), because alignment (6.2 step 5) is a similarity transform onto that template. A detector that emits no keypoints, or emits them in another order, cannot be adopted however good its boxes are: the crop would be warped wrongly and every embedding taken from it would be silently off.
 - Never import the `insightface` Python package at runtime. Its model loader fetches weights over the network, which breaks C1. Adapters load raw `.onnx` files from `models/` through onnxruntime directly.
 - Every match stores the `embedder_model_id` that produced its scores (`matches.embedder_model_id`).
 
@@ -548,7 +553,7 @@ face-match/
   backend/
     app/api/           routers + deps.py (connection pool, effective settings)
     app/core/          interfaces, registry, scoring, acceptance, vectors, storage
-    app/adapters/      yunet.py, sface.py, arcface_r50.py
+    app/adapters/      yunet.py, scrfd.py, sface.py, arcface.py, boxes.py
     app/pipeline/      ingest.py, decode.py, quality.py, align.py, process.py,
                        matching.py, reembed.py, capture.py, live.py
     app/db/            conn.py, migrate.py, migrations/

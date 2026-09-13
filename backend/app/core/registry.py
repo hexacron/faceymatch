@@ -29,7 +29,8 @@ from pathlib import Path
 
 import onnxruntime as ort
 
-from app.adapters.arcface_r50 import ArcFaceR50Embedder
+from app.adapters.arcface import ArcFaceEmbedder
+from app.adapters.scrfd import ScrfdDetector
 from app.adapters.sface import SFaceEmbedder
 from app.adapters.yunet import YuNetDetector
 from app.config import Settings
@@ -43,11 +44,17 @@ CPU_PROVIDER = "CPUExecutionProvider"
 # Embedder id -> adapter class (spec 6.3). A detector or embedder id that is not here is a
 # configuration error, not a silent fallback: scores from an unexpected model would be
 # compared against templates from another one (invariant 2).
-_EMBEDDER_CLASSES: dict[str, type[SFaceEmbedder] | type[ArcFaceR50Embedder]] = {
+_EMBEDDER_CLASSES: dict[str, type[SFaceEmbedder] | type[ArcFaceEmbedder]] = {
     "sface-2021dec": SFaceEmbedder,
-    "buffalo_l-w600k_r50": ArcFaceR50Embedder,
+    "buffalo_l-w600k_r50": ArcFaceEmbedder,
+    "antelopev2-glintr100": ArcFaceEmbedder,
 }
-_DETECTOR_IDS = frozenset({"yunet-2023mar"})
+# Detector id -> adapter class, same contract: every class here takes the same keyword
+# arguments, so switching detector is a lookup and not a branch.
+_DETECTOR_CLASSES: dict[str, type[YuNetDetector] | type[ScrfdDetector]] = {
+    "yunet-2023mar": YuNetDetector,
+    "buffalo_l-det_10g": ScrfdDetector,
+}
 
 _CacheKey = tuple[str, str, str, str, bool, tuple[tuple[str, str, str], ...]]
 _cache: dict[_CacheKey, ActiveModels] = {}
@@ -61,7 +68,7 @@ def has_adapter(model_id: str, *, kind: str) -> bool:
     be unrunnable here, because no adapter implements it. Exposed so a configuration change
     is refused by the request that made it rather than by the next job.
     """
-    return model_id in (_DETECTOR_IDS if kind == "detector" else _EMBEDDER_CLASSES)
+    return model_id in (_DETECTOR_CLASSES if kind == "detector" else _EMBEDDER_CLASSES)
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,10 +129,11 @@ def load_active_models(settings: Settings, lock: ModelsLock) -> ActiveModels:
     detector_entry = assert_loadable(lock, settings.detector_model, settings)
     embedder_entry = assert_loadable(lock, settings.embedder_model, settings)
 
-    if detector_entry.id not in _DETECTOR_IDS:
+    detector_class = _DETECTOR_CLASSES.get(detector_entry.id)
+    if detector_class is None:
         raise ModelsLockError(
             f"no detector adapter for {detector_entry.id!r}; known: "
-            f"{', '.join(sorted(_DETECTOR_IDS))}"
+            f"{', '.join(sorted(_DETECTOR_CLASSES))}"
         )
     embedder_class = _EMBEDDER_CLASSES.get(embedder_entry.id)
     if embedder_class is None:
@@ -146,7 +154,7 @@ def load_active_models(settings: Settings, lock: ModelsLock) -> ActiveModels:
     detector_session = build_session(detector_path, providers)
     embedder_session = build_session(embedder_path, providers)
 
-    detector = YuNetDetector(
+    detector = detector_class(
         detector_session,
         model_id=detector_entry.id,
         score_threshold=settings.min_det_score,

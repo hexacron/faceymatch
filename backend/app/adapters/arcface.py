@@ -1,4 +1,4 @@
-"""buffalo_l w600k_r50 embedder adapter (spec 6.3, C7).
+"""ArcFace embedder adapter: buffalo_l w600k_r50 and antelopev2 glintr100 (spec 6.3, C7).
 
 Non-commercial weights: loading is gated on the `allow_noncommercial_models` setting
 (invariant 9), an audited operator decision that `app.core.registry` enforces through
@@ -6,10 +6,12 @@ Non-commercial weights: loading is gated on the `allow_noncommercial_models` set
 onnxruntime; the `insightface` package is never imported, since its loader fetches weights
 over the network and would break C1 (spec 6.3).
 
-Verified graph IO for `models/w600k_r50.onnx` (onnxruntime 1.30):
+Verified graph IO (onnxruntime 1.30). Both exports, one contract:
 
-    input  'input.1' [N, 3, 112, 112] float32   (dynamic batch)
-    output '683'     [N, 512]         float32
+    models/w600k_r50.onnx    input 'input.1' [N, 3, 112, 112] -> output '683'  [N, 512]
+    models/glintr100.onnx    input 'input.1' [N, 3, 112, 112] -> output '1333' [N, 512]
+
+Both take a dynamic batch, so `MAX_BATCH` chunking applies to either.
 
 Preprocessing, verified empirically on LFW-funneled pairs rather than taken on trust
 (a wrong channel order or a missing normalisation collapses the same-identity vs impostor
@@ -37,8 +39,12 @@ INPUT_STD = 127.5
 MAX_BATCH = 32
 
 
-class ArcFaceR50Embedder:
-    """`app.core.types.Embedder` over the buffalo_l w600k_r50 ONNX export."""
+class ArcFaceEmbedder:
+    """`app.core.types.Embedder` over an ArcFace ONNX export (R50 or R100).
+
+    Both exports take the same aligned 112x112 crop, the same normalisation and the same
+    512-d L2-normalized output, so one class serves both ids; only the graph differs.
+    """
 
     def __init__(
         self, session: ort.InferenceSession, *, model_id: str, dim: int = ARCFACE_DIM
