@@ -45,10 +45,14 @@ section 12 applies in full, and investigative use raises that bar rather than lo
 ## Commands
 
 ```
+./run                            # everything: startup checks, API, worker; Ctrl-C stops all
+./run --watch                    # ... plus the watch helper (spec 6.11, macOS only)
+                                 # logs in data/logs; --port and --no-ui-build also exist
+
 cd backend
 uv sync --extra dev              # backend deps (uv-managed CPython: sqlite needs loadable extensions)
 uv run pytest                    # backend tests
-uv run ruff check . ../eval ../tools && uv run mypy   # one ruff.toml at the repo root; mypy covers app + eval + tools
+uv run ruff check . ../eval ../tools && uv run mypy   # one ruff.toml at the repo root; mypy covers app + watch + eval + tools
 uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
 uv run python -m app.worker      # job worker, separate process
 uv run python -m app.cli check   # startup checks: schema, models.lock
@@ -56,9 +60,18 @@ uv run python -m app.cli verify-audit
 uv run python -m app.cli enqueue-reembed   # re-embed stored crops under the active embedder
                                            # (spec 6.3). PATCH /api/config queues it too.
 
+# watch helper (spec 6.11): operator-started desktop app, macOS only. Qt and the capture
+# libraries live in the `watch` extra, so a plain `uv sync` never pulls them.
+uv sync --extra dev --extra watch
+uv run --extra watch python -m watch           # --url, --fps; needs the API running
+
 # minimal calibration (spec 10): writes the report and an inactive calibrated threshold_set.
 # Activate it with POST /api/threshold_sets/{id}/activate; nothing auto-accepts before that.
 uv run python ../eval/run.py ../fixtures --output ../eval/report.json
+
+# performance: medians over a scratch DB, a synthetic gallery and fixture faces. Never
+# touches data/facematch.db. Quote its JSON before and after any change that claims a speedup.
+uv run python ../tools/bench_perf.py
 
 # weights: build-time only, digest-pinned, never fetched at runtime (C1)
 uv run --python 3.12 --no-project python tools/fetch_models.py       # from repo root
@@ -91,6 +104,7 @@ Update this section when commands change.
 
 - Camera or sensor capture (webcam, phone, capture card, network stream).
 - Unattended or continuous monitoring, and alerting. Operator-initiated screen capture and
-  live match of the operator's own display are in scope (spec 6.10).
+  live match of the operator's own display are in scope (spec 6.10), including the watch
+  helper that follows one chosen window until the operator stops it (spec 6.11).
 - Web or third-party face search.
 - Mobile clients.
