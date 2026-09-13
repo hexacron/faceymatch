@@ -7,7 +7,9 @@ Verified graph IO for `models/face_recognition_sface_2021dec.onnx` (onnxruntime 
     input  'data' [1, 3, 112, 112] float32
     output 'fc1'  [1, 128]         float32
 
-The batch dimension is fixed at 1, so `embed` accepts an (N, 112, 112, 3) batch and loops.
+The batch dimension is fixed at 1, so `embed` accepts an (N, 112, 112, 3) batch and issues
+one Run per crop, overlapped on a small thread pool. Each Run sees exactly the tensor the
+serial loop gave it, so the returned vectors are byte-identical either way.
 
 Preprocessing, verified empirically on LFW-funneled pairs rather than taken on trust
 (the same-identity vs impostor cosine gap collapses if the channel order or the value
@@ -25,6 +27,8 @@ Output is L2-normalized here so cosine is a plain dot product downstream.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import onnxruntime as ort
 
@@ -32,6 +36,13 @@ from app.core.types import CROP_SIZE
 from app.core.vectors import l2_normalize
 
 SFACE_DIM = 128
+
+# One ONNX Run per crop is forced by the graph's fixed batch of 1, so the only way to
+# shorten a multi-face frame without re-exporting the weights is to overlap the Runs:
+# `Session.run` releases the GIL and onnxruntime allows concurrent Run on one session.
+# Bounded at 4 because past that the runs contend for the same accelerator, latency stops
+# improving, and the resident blob count does not.
+_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="sface-embed")
 
 
 class SFaceEmbedder:
@@ -49,20 +60,30 @@ class SFaceEmbedder:
     def embed(self, crops: np.ndarray) -> np.ndarray:
         """crops: (N, 112, 112, 3) uint8 RGB aligned. Returns (N, dim) float32, L2-normed."""
         batch = _validate_crops(crops)
-        out = np.empty((batch.shape[0], self.dim), dtype=np.float32)
-        for index in range(batch.shape[0]):
-            # RGB -> BGR, raw values, NCHW, batch of 1 (the graph's batch is fixed).
-            blob = np.ascontiguousarray(
-                batch[index][:, :, ::-1].transpose(2, 0, 1)[None].astype(np.float32)
-            )
-            raw = self._session.run(self._output_names, {self._input_name: blob})[0]
-            vector = np.asarray(raw, dtype=np.float32).reshape(-1)
-            if vector.size != self.dim:
-                raise ValueError(
-                    f"{self.model_id}: model returned {vector.size} values, expected {self.dim}"
-                )
-            out[index] = vector
+        # RGB -> BGR, raw values, NCHW, batch of 1 (the graph's batch is fixed).
+        blobs = [
+            np.ascontiguousarray(crop[:, :, ::-1].transpose(2, 0, 1)[None].astype(np.float32))
+            for crop in batch
+        ]
+        out = np.empty((len(blobs), self.dim), dtype=np.float32)
+        if len(blobs) == 1:
+            # The still-image path embeds one crop at a time; a thread hand-off would be
+            # pure overhead there.
+            out[0] = self._run_one(blobs[0])
+        else:
+            for index, vector in enumerate(_POOL.map(self._run_one, blobs)):
+                out[index] = vector
         return l2_normalize(out, axis=1)
+
+    def _run_one(self, blob: np.ndarray) -> np.ndarray:
+        """One Run. Order is restored by the caller, so this may execute on any thread."""
+        raw = self._session.run(self._output_names, {self._input_name: blob})[0]
+        vector = np.asarray(raw, dtype=np.float32).reshape(-1)
+        if vector.size != self.dim:
+            raise ValueError(
+                f"{self.model_id}: model returned {vector.size} values, expected {self.dim}"
+            )
+        return vector
 
 
 def _validate_crops(crops: np.ndarray) -> np.ndarray:

@@ -39,6 +39,24 @@ class UnknownJobKindError(RuntimeError):
     """No handler is registered for this job kind."""
 
 
+_LOCK_CACHE: dict[tuple[str, str, str], models_lock.ModelsLock] = {}
+
+
+def _verified_lock(settings: Settings) -> models_lock.ModelsLock:
+    """Verify models.lock once per (models_dir, detector, embedder), not once per job.
+
+    Invariant 8 is about refusing to RUN a model whose bytes moved; re-hashing the same
+    files between two jobs of the same model proves nothing the first verify did not.
+    A config switch changes the key, so the new model is verified before it is used.
+    """
+    key = (str(settings.models_dir), settings.detector_model, settings.embedder_model)
+    cached = _LOCK_CACHE.get(key)
+    if cached is None:
+        cached = models_lock.verify(settings.models_dir)
+        _LOCK_CACHE[key] = cached
+    return cached
+
+
 def handle_audit_verify(
     conn: sqlite3.Connection, job: Job, settings: Settings
 ) -> dict[str, Any]:
@@ -72,7 +90,7 @@ def handle_process(
     media_id = job.params.get("media_id")
     if not isinstance(media_id, str) or not media_id:
         raise ValueError("process job requires a string media_id")
-    lock = models_lock.verify(settings.models_dir)
+    lock = _verified_lock(settings)
     active = get_active_models(settings, lock)
     result = process_image(
         conn, settings, active, media_id=media_id, actor=settings.operator_name
@@ -83,7 +101,7 @@ def handle_process(
 def handle_rematch(
     conn: sqlite3.Connection, job: Job, settings: Settings
 ) -> dict[str, Any]:
-    lock = models_lock.verify(settings.models_dir)
+    lock = _verified_lock(settings)
     active = get_active_models(settings, lock)
     return rematch(
         conn,
@@ -104,7 +122,7 @@ def handle_reembed(
     a half-finished switch that silently retargets is how two models end up mixed in one
     gallery (invariant 2).
     """
-    lock = models_lock.verify(settings.models_dir)
+    lock = _verified_lock(settings)
     active = get_active_models(settings, lock)
     target = job.params.get("embedder_model_id")
     if isinstance(target, str) and target != active.embedder_model_id:

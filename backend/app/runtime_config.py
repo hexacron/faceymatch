@@ -43,7 +43,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
@@ -58,6 +59,7 @@ from app.models_lock import (
     ModelsLockError,
     assert_loadable,
     sha256_file,
+    sha256_file_cached,
 )
 
 # The editable surface, in the order the API reports it.
@@ -224,7 +226,12 @@ def _assert_active_model_survives(
 
 
 def assert_model_usable(
-    lock: ModelsLock, model_id: str, *, kind: str, settings: Settings
+    lock: ModelsLock,
+    model_id: str,
+    *,
+    kind: str,
+    settings: Settings,
+    digest: Callable[[Path], str] = sha256_file,
 ) -> ModelEntry:
     """Refuse a model this install must not run (invariants 8, 9).
 
@@ -236,6 +243,10 @@ def assert_model_usable(
     can fix — not locked, wrong kind, no adapter, weights absent, digest mismatch — so
     reporting one of those first means a licence refusal states the only remaining obstacle.
     A caller drafting a licence change can then trust that turning the flag on is enough.
+
+    `digest` exists so the reporting path can memoise. It defaults to the uncached
+    `sha256_file`, which is what the switch itself must use: `PATCH /api/config` is the
+    moment the bytes are proved, and nothing weaker is allowed to stand in for that.
     """
     entry = lock.by_id(model_id)
     if entry is None:
@@ -259,7 +270,7 @@ def assert_model_usable(
             f"{settings.models_dir}; provision weights with tools/fetch_models.py "
             "(they are never fetched at runtime, C1)"
         )
-    actual = sha256_file(path)
+    actual = digest(path)
     if actual != entry.sha256:
         raise InvalidValueError(
             f"{entry.file} does not match models.lock (expected {entry.sha256[:12]}, "
@@ -284,9 +295,15 @@ def blocked_reason(
     cannot disagree about what is selectable. The model that is currently active gets no
     exemption: if the licence gate is off and a non-commercial model is somehow running,
     that has to be visible here rather than quietly fine.
+
+    Digests come from the memoised `sha256_file_cached`: `GET /api/config` reports every
+    lock entry, and hashing 203 MB of weights to redraw a picker is a cost with no reader.
+    The refusal strings are identical either way, and the switch itself still re-hashes.
     """
     try:
-        assert_model_usable(lock, model_id, kind=kind, settings=settings)
+        assert_model_usable(
+            lock, model_id, kind=kind, settings=settings, digest=sha256_file_cached
+        )
     except InvalidValueError as exc:
         return str(exc)
     return None

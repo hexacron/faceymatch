@@ -31,6 +31,13 @@ def connect(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous = FULL")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+    # The gallery matmul is fed by table scans of `templates` and `tracks`, and the audit
+    # chain is read back entry by entry. 64 MiB of page cache holds this whole database,
+    # so a second read of the same rows is memory rather than syscalls. `synchronous` stays
+    # FULL: the audit log is the evidence, and its durability is not tradeable for speed.
+    conn.execute("PRAGMA cache_size = -65536")  # negative = KiB, not pages
+    conn.execute("PRAGMA mmap_size = 268435456")  # 256 MiB
+    conn.execute("PRAGMA temp_store = MEMORY")
     return conn
 
 

@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
-from app import audit, jobs
+import numpy as np
+import pytest
+
+from app import audit, jobs, models_lock, worker
 from app.config import Settings
+from app.core.registry import ActiveModels
+from app.core.types import Detection
 from app.db.conn import transaction
 from app.worker import run_once
 
@@ -88,3 +94,79 @@ def test_failed_verification_fails_the_job(
     assert failed.status == "failed"
     assert failed.error is not None
     assert "chain verification failed at seq 1" in failed.error
+
+
+class _UnusedDetector:
+    model_id = "detector"
+
+    def detect(self, image: np.ndarray) -> list[Detection]:
+        raise AssertionError("the rematch handler must not detect")
+
+
+class _UnusedEmbedder:
+    model_id = "embedder"
+    dim = 2
+
+    def embed(self, crops: np.ndarray) -> np.ndarray:
+        raise AssertionError("the rematch handler must not embed")
+
+
+def test_two_jobs_verify_the_weights_once(
+    conn: sqlite3.Connection, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Invariant 8 is enforced per model, not per job: 203 MB is not re-hashed each time.
+
+    A second `process` or `rematch` job on the same configuration reads the same bytes the
+    first one already proved, so the second verify is pure cost.
+    """
+    worker._LOCK_CACHE.clear()
+    calls: list[Path] = []
+
+    def counting_verify(
+        models_dir: Path, lock: models_lock.ModelsLock | None = None
+    ) -> models_lock.ModelsLock:
+        calls.append(models_dir)
+        return models_lock.load(models_dir)
+
+    monkeypatch.setattr(worker.models_lock, "verify", counting_verify)
+    monkeypatch.setattr(
+        worker,
+        "get_active_models",
+        lambda settings, lock: ActiveModels(
+            detector=_UnusedDetector(),
+            embedder=_UnusedEmbedder(),
+            detector_model_id="detector",
+            embedder_model_id="embedder",
+            execution_provider="CPUExecutionProvider",
+        ),
+    )
+
+    for _ in range(2):
+        jobs.enqueue(conn, kind="rematch", actor=settings.operator_name)
+        ran = run_once(conn, settings)
+        assert ran is not None
+        done = jobs.get(conn, ran.id)
+        assert done is not None
+        assert done.status == "done", done.error
+
+    assert calls == [settings.models_dir]
+
+
+def test_a_different_model_is_verified_before_it_runs(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cache key is the models it would load, so a switch re-verifies rather than trusts."""
+    worker._LOCK_CACHE.clear()
+    calls: list[str] = []
+
+    def counting_verify(
+        models_dir: Path, lock: models_lock.ModelsLock | None = None
+    ) -> models_lock.ModelsLock:
+        calls.append(str(models_dir))
+        return models_lock.load(models_dir)
+
+    monkeypatch.setattr(worker.models_lock, "verify", counting_verify)
+
+    worker._verified_lock(settings)
+    worker._verified_lock(settings.model_copy(update={"embedder_model": "another-model"}))
+    assert len(calls) == 2

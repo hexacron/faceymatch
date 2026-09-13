@@ -108,15 +108,33 @@ def process_image(
 
     image = decode.decode_image(_stored_path(settings.media_dir, str(row["path"])))
     detections = models.detector.detect(image)
+    reports = [quality.evaluate(image, detection, settings) for detection in detections]
+    # Store the crops first, then embed them in one call: ArcFace takes the whole stack as
+    # a single Run and SFace overlaps its fixed-batch Runs, so one call per image beats one
+    # call per face on both adapters. Every passing crop is still embedded — the live cap
+    # has no business on the evidence path.
+    crop_hashes: list[str] = []
+    crops: list[np.ndarray] = []
+    for detection, report in zip(detections, reports, strict=True):
+        if report.passed:
+            crop = align.align_crop(image, detection.landmarks)
+            crop_hashes.append(storage.store_crop(settings.crops_dir, crop))
+            crops.append(crop)
+    embeddings = (
+        models.embedder.embed(np.stack(crops))
+        if crops
+        else np.zeros((0, models.embedder.dim), dtype=np.float32)
+    )
+
     prepared: list[_PreparedDetection] = []
-    for det_idx, detection in enumerate(detections):
-        report = quality.evaluate(image, detection, settings)
+    passed_idx = 0
+    for det_idx, (detection, report) in enumerate(zip(detections, reports, strict=True)):
         crop_sha256: str | None = None
         embedding: np.ndarray | None = None
         if report.passed:
-            crop = align.align_crop(image, detection.landmarks)
-            crop_sha256 = storage.store_crop(settings.crops_dir, crop)
-            embedding = models.embedder.embed(crop)[0]
+            crop_sha256 = crop_hashes[passed_idx]
+            embedding = embeddings[passed_idx]
+            passed_idx += 1
         prepared.append(
             _PreparedDetection(
                 track_id=new_id(),

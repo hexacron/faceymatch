@@ -81,6 +81,26 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+# Keyed on the stat tuple, so a file that is replaced in place is re-hashed.
+_DIGEST_CACHE: dict[tuple[str, int, int], str] = {}
+
+
+def sha256_file_cached(path: Path) -> str:
+    """`sha256_file` memoised on (path, size, mtime_ns).
+
+    For reporting whether a model *could* be selected. Selection itself
+    (`PATCH /api/config`) keeps the uncached `sha256_file`: a switch is the moment the
+    bytes must be proved, and a stat tuple is not proof.
+    """
+    stat = path.stat()
+    key = (str(path), stat.st_size, stat.st_mtime_ns)
+    digest = _DIGEST_CACHE.get(key)
+    if digest is None:
+        digest = sha256_file(path)
+        _DIGEST_CACHE[key] = digest
+    return digest
+
+
 def load(models_dir: Path) -> ModelsLock:
     lock_path = models_dir / LOCK_FILENAME
     if not lock_path.is_file():

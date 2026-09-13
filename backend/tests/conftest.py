@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import audit
+from app.api.deps import reset_pool
 from app.config import Settings
 from app.db.conn import connect, transaction
 from app.db.migrate import migrate
@@ -55,6 +56,18 @@ def isolate_settings_sources(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(Settings.model_config, "env_file", None)
     for field in Settings.model_fields:
         monkeypatch.delenv(field.upper(), raising=False)
+
+
+@pytest.fixture(autouse=True)
+def reset_connection_pool() -> Iterator[None]:
+    """API connections outlive a request now, so they must not outlive a test.
+
+    Each test gets its own database under `tmp_path`; a pooled connection left open from
+    the previous test would keep serving that test's rows to this one.
+    """
+    reset_pool()
+    yield
+    reset_pool()
 
 
 @pytest.fixture

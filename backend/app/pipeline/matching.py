@@ -48,6 +48,42 @@ class _MatchWrite:
     best_template_id: str
 
 
+# One statement for the whole track scan. A rematch scoped to a handful of tracks (one per
+# enrolment, one per revoke) used to load every track in the database and filter in Python.
+_TRACK_SELECT = (
+    "SELECT t.id, t.embedding_mean, m.case_id FROM tracks t "
+    "JOIN media m ON m.id = t.media_id "
+    "WHERE t.embedding_mean IS NOT NULL AND t.embedder_model_id = ?"
+)
+# Bound parameters per statement. Well under SQLite's limit, and it keeps the plan simple.
+_ID_CHUNK = 500
+
+
+def _track_rows(
+    conn: sqlite3.Connection, *, embedder_model_id: str, track_ids: set[str] | None
+) -> list[sqlite3.Row]:
+    """Stored track means for this embedder, optionally narrowed to `track_ids`.
+
+    Chunked because the id set has no upper bound. Each chunk is a contiguous run of the
+    sorted ids ordered by id, so the concatenation is still globally ordered by id and a
+    re-match writes its rows in the same sequence every time.
+    """
+    if track_ids is None:
+        return conn.execute(f"{_TRACK_SELECT} ORDER BY t.id", (embedder_model_id,)).fetchall()
+    ordered = sorted(track_ids)
+    rows: list[sqlite3.Row] = []
+    for start in range(0, len(ordered), _ID_CHUNK):
+        chunk = ordered[start : start + _ID_CHUNK]
+        placeholders = ",".join("?" * len(chunk))
+        rows.extend(
+            conn.execute(
+                f"{_TRACK_SELECT} AND t.id IN ({placeholders}) ORDER BY t.id",
+                (embedder_model_id, *chunk),
+            ).fetchall()
+        )
+    return rows
+
+
 def rematch(
     conn: sqlite3.Connection,
     settings: Settings,
@@ -84,18 +120,11 @@ def rematch(
     person_ids = [str(row["person_id"]) for row in gallery_rows]
     template_ids = [str(row["id"]) for row in gallery_rows]
     gallery = vectors.stack_blobs([bytes(row["embedding"]) for row in gallery_rows], dim)
-    gallery_persons = len(set(person_ids))
+    person_index = scoring.PersonIndex.build(person_ids)
+    gallery_persons = len(person_index.persons)
 
-    all_track_rows = conn.execute(
-        "SELECT t.id, t.embedding_mean, m.case_id FROM tracks t "
-        "JOIN media m ON m.id = t.media_id "
-        "WHERE t.embedding_mean IS NOT NULL AND t.embedder_model_id = ? ORDER BY t.id",
-        (embedder_model_id,),
-    ).fetchall()
-    track_rows = (
-        all_track_rows
-        if track_ids is None
-        else [row for row in all_track_rows if str(row["id"]) in track_ids]
+    track_rows = _track_rows(
+        conn, embedder_model_id=embedder_model_id, track_ids=track_ids
     )
 
     gate = acceptance.build_gate(
@@ -120,6 +149,7 @@ def rematch(
                     template_ids,
                     mode=settings.person_score_mode,
                     top_k=settings.top_k,
+                    index=person_index,
                 )
                 band, _, _ = scoring.band_for_candidates(candidates, gate.thresholds)
                 track_id = str(row["id"])

@@ -165,6 +165,24 @@ def test_the_model_list_says_why_a_model_cannot_be_picked(
     assert "not present" in absent["blocked_reason"]
 
 
+def test_the_report_follows_the_bytes_after_the_first_read(
+    api: TestClient, provisioned: Settings
+) -> None:
+    """`GET /api/config` memoises digests on the stat tuple; a tampered file must still show.
+
+    The read path does not re-hash 203 MB of weights to redraw a picker, so the thing worth
+    proving is that the memo is invalidated by the file changing rather than by luck.
+    """
+    first = {item["id"]: item for item in api.get("/api/config").json()["models"]}
+    assert first[SFACE]["selectable"] is True
+
+    (provisioned.models_dir / "sface.onnx").write_bytes(b"tampered")
+
+    after = {item["id"]: item for item in api.get("/api/config").json()["models"]}
+    assert after[SFACE]["selectable"] is False
+    assert "does not match models.lock" in after[SFACE]["blocked_reason"]
+
+
 def test_the_active_model_is_not_exempt_from_the_licence_report(
     permissive: TestClient, provisioned: Settings
 ) -> None:
