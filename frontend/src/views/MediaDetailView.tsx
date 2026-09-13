@@ -71,6 +71,13 @@ function ImageOverlay({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawables = useMemo(() => drawableTracks(tracks.tracks), [tracks.tracks]);
 
+  /**
+   * Cursor position in CSS pixels relative to the overlay, or null. A ref, not
+   * state: the pointer moves at the display rate and the handler redraws the
+   * canvas directly rather than re-rendering the view for every move.
+   */
+  const pointerRef = useRef<{ x: number; y: number } | null>(null);
+
   const draw = useCallback(() => {
     const image = imageRef.current;
     const canvas = canvasRef.current;
@@ -90,8 +97,21 @@ function ImageOverlay({
     if (box.scale <= 0) {
       return;
     }
+    // A caption over every box hides the faces underneath it. The label belongs
+    // to the box the operator is pointing at, or the one they have selected;
+    // the track list carries the same text for all of them at once.
+    const pointer = pointerRef.current;
+    const hovered =
+      pointer === null
+        ? null
+        : hitTestImageRects(
+            drawables.map(({ sample }) => sampleRect(sample)),
+            pointer.x,
+            pointer.y,
+            box,
+          );
 
-    for (const { track, sample } of drawables) {
+    for (const [index, { track, sample }] of drawables.entries()) {
       const rect = imageRectToCss(sampleRect(sample), box);
       const selected = track.track_id === selectedTrackId;
       const color = selected
@@ -100,8 +120,11 @@ function ImageOverlay({
           ? NO_BAND_COLOR
           : BAND_COLOR[track.band];
       context.strokeStyle = color;
-      context.lineWidth = selected ? 3 : 2;
+      context.lineWidth = selected || index === hovered ? 3 : 2;
       context.strokeRect(rect.x, rect.y, rect.w, rect.h);
+      if (!selected && index !== hovered) {
+        continue;
+      }
 
       const label = `${track.name ?? "unidentified"} · ${track.band ?? "no match"} ${formatScore(track.score)} · #${track.track_id.slice(0, 8)}${track.source === "operator" ? " · OP" : ""}`;
       context.font = "12px ui-monospace, SFMono-Regular, Menlo, monospace";
@@ -114,22 +137,35 @@ function ImageOverlay({
     }
   }, [drawables, media.height, media.width, selectedTrackId, tracks.height, tracks.width]);
 
+  // The observer only ever needs to call the latest `draw`, and `draw` changes
+  // identity on every poll response. Keying the effect on it disconnected and
+  // rebuilt the observer once a second for a picture that had not moved.
+  const drawRef = useRef(draw);
+  drawRef.current = draw;
+
+  useEffect(() => {
+    drawRef.current();
+  }, [draw]);
+
   useEffect(() => {
     const image = imageRef.current;
     if (image === null) {
       return;
     }
-    const observer = new ResizeObserver(draw);
+    const redraw = (): void => {
+      drawRef.current();
+    };
+    const observer = new ResizeObserver(redraw);
     observer.observe(image);
-    image.addEventListener("load", draw);
-    window.addEventListener("resize", draw);
-    draw();
+    image.addEventListener("load", redraw);
+    window.addEventListener("resize", redraw);
+    redraw();
     return () => {
       observer.disconnect();
-      image.removeEventListener("load", draw);
-      window.removeEventListener("resize", draw);
+      image.removeEventListener("load", redraw);
+      window.removeEventListener("resize", redraw);
     };
-  }, [draw]);
+  }, []);
 
   function hitTest(event: MouseEvent<HTMLCanvasElement>): void {
     const image = imageRef.current;
@@ -156,6 +192,21 @@ function ImageOverlay({
     }
   }
 
+  function onPointerMove(event: MouseEvent<HTMLCanvasElement>): void {
+    const canvas = canvasRef.current;
+    if (canvas === null) {
+      return;
+    }
+    const bounds = canvas.getBoundingClientRect();
+    pointerRef.current = { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
+    drawRef.current();
+  }
+
+  function onPointerLeave(): void {
+    pointerRef.current = null;
+    drawRef.current();
+  }
+
   return (
     <>
       <div className="image-stage">
@@ -163,7 +214,9 @@ function ImageOverlay({
         <canvas
           ref={canvasRef}
           onClick={hitTest}
-          aria-label="Face detection overlay. Select a face using the buttons below."
+          onMouseMove={onPointerMove}
+          onMouseLeave={onPointerLeave}
+          aria-label="Face detection overlay. Hover a box to read its label. Select a face using the buttons below."
         />
       </div>
       {drawables.length === 0 ? (
@@ -438,8 +491,25 @@ export default function MediaDetailView({
   mediaId: string;
   focus: Rect | null;
 }) {
-  const media = useResource<Media>(`/api/media/${encodeURIComponent(mediaId)}`, 1_000);
-  const tracks = useResource<MediaTracks>(`/api/media/${encodeURIComponent(mediaId)}/tracks`, 1_000);
+  /**
+   * Polling stops when the pipeline does.
+   *
+   * `done` and `failed` are terminal for a media row: the worker will not touch
+   * it again, so every further request returns the same bytes. This page used
+   * to poll two endpoints a second for as long as it stayed open, competing
+   * with the live loop for the one uvicorn worker.
+   */
+  const media = useResource<Media>(`/api/media/${encodeURIComponent(mediaId)}`, 1_000, {
+    stopWhen: (row) => row.status === "done" || row.status === "failed",
+  });
+  const settled =
+    media.state.phase === "ready" &&
+    (media.state.data.status === "done" || media.state.data.status === "failed");
+  // Tracks have no status of their own; they stop changing when the media does.
+  const tracks = useResource<MediaTracks>(
+    `/api/media/${encodeURIComponent(mediaId)}/tracks`,
+    settled ? 0 : 1_000,
+  );
   const [selectedTrackId, setSelectedTrackId] = useState<string | null>(null);
   const [focusNote, setFocusNote] = useState<string | null>(null);
   // One resolution per handoff: once it lands, the operator's own clicks win.
