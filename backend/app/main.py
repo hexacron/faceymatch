@@ -33,6 +33,7 @@ from app.api import persons as persons_router
 from app.api import review as review_router
 from app.api import thresholds as thresholds_router
 from app.api import tracks as tracks_router
+from app.api import watch as watch_router
 from app.config import Settings, get_settings
 from app.db.conn import assert_extension_loading_available, connect, transaction
 from app.db.migrate import migrate
@@ -153,6 +154,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(media_router.router)
     app.include_router(capture_router.router)
     app.include_router(live_router.router)
+    app.include_router(watch_router.router)
     app.include_router(tracks_router.router)
     app.include_router(identifications_router.router)
     app.include_router(persons_router.router)

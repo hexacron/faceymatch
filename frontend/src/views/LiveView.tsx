@@ -5,6 +5,7 @@ import type { CaseList, LiveFace, LiveMatchResult, LiveTimings } from "../api/ty
 import { BandPill } from "../components/BandPill";
 import { CaseBasis } from "../components/CaseBasis";
 import { Loaded } from "../components/Loading";
+import { WatchHelper } from "../components/WatchHelper";
 import { BAND_COLOR, formatScore, NO_BAND_COLOR } from "../lib/display";
 import {
   bestOverlapRect,
@@ -611,6 +612,8 @@ export default function LiveView() {
             ? "it is filed to the selected case."
             : `it is filed to case “${caseName}”.`}
       </p>
+
+      <WatchHelper />
 
       {selected !== null && (
         <CaseBasis key={selected.id} record={selected} onAmended={cases.reload} />

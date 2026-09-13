@@ -231,6 +231,34 @@ export type CaptureRequest = {
   source_url: string | null;
 };
 
+/* ----------------------------------------------------------- watch helper */
+
+/**
+ * `GET /api/watch` (spec 6.11). `available` is the only field the button needs;
+ * `reason` is non-null exactly when `available` is false, and the two
+ * narrower booleans are diagnostics. `running` and `pid` cover helpers this
+ * backend started — one the operator ran from a terminal is invisible here.
+ */
+export type WatchStatus = {
+  available: boolean;
+  platform_supported: boolean;
+  extra_installed: boolean;
+  running: boolean;
+  pid: number | null;
+  reason: string | null;
+};
+
+/**
+ * `POST /api/watch/launch`: no body, because nothing a caller sends may reach
+ * the helper's command line. 409 means one started from here is still up; 503
+ * means it cannot run on this machine or install.
+ */
+export type WatchLaunch = {
+  pid: number;
+  /** Where the helper's own output goes, for a launch that says nothing else. */
+  log_path: string;
+};
+
 /* -------------------------------------------------------------------- live */
 
 /**

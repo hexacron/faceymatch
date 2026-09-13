@@ -6,7 +6,7 @@ Status: All core decisions closed. Proposed items can change during build.
 
 Changes from 0.5:
 
-- New section 6.11: a local watch helper (`backend/watch/`) that the operator starts, points at one window, display or region of their own machine, and stops. It matches through the same `POST /api/live/match` as the Live view and stores nothing of its own; enrolment goes through `POST /api/media` and the existing tag panel. It is not monitoring: there is no alerting, no recording, no schedule, and it dies with its window.
+- New section 6.11: a local watch helper (`backend/watch/`) that the operator starts, points at one window, display or dragged region of their own machine, and stops. It matches through the same `POST /api/live/match` as the Live view and stores nothing of its own; enrolment goes through `POST /api/media` and the existing tag panel. It is not monitoring: there is no alerting, no recording, no schedule, and it dies with its window. The operator starts it from a terminal or with `POST /api/watch/launch`, the audited, fixed-argv, macOS-only endpoint behind the button in the Live view.
 - `POST /api/live/match` takes an optional `identify` form field (default true). `identify=false` returns boxes and the quality verdict only — no alignment, no embedding, no gallery scoring — so a client can track faces at detector latency and ask for names less often. The response echoes it as `identified`, because an empty candidate list otherwise cannot be told from a frame nobody was asked to identify. Persisting nothing is unchanged, and invariant 13 is untouched: a boxes-only frame is even further from evidence than an identify frame.
 - `models.lock` verification is once per process per model configuration, not once per job (6.3). Invariant 8 is about refusing to run weights whose bytes moved; re-hashing the same files between two jobs of the same model proves nothing the first verification did not.
 - Performance work across the pipeline, all of it numerics-preserving and none of it touching the execution provider, graph optimisation level or any weight file. Measured by `tools/bench_perf.py` (section 11).
@@ -321,6 +321,10 @@ Enrolment from the helper is the tier 1 path, unchanged: the operator clicks a f
 
 It is operator-initiated and bounded, which is what keeps it outside the monitoring ban in section 2: it starts on a click, watches exactly one surface the operator picked, raises no alert, records no video, and stops when the operator stops it or the window it was following closes.
 
+The operator starts it in one of two places, and both are the same action. `./run --watch` starts it with the install, and `POST /api/watch/launch` starts it from the Live view, which is where the operator already is at the moment the browser's own sampling loop is the thing in the way. The endpoint takes no request body, because nothing a caller sends may reach a command line: the argv is a frozen constant — the interpreter already serving the API, `-m watch`, no shell, run from `backend/` — so the only thing a request decides is whether a helper starts. Launching through that interpreter rather than through a package manager is what makes C1 structural rather than incidental, since a launch that could resolve a missing Qt would be an outbound call on an operator's click; it also means the pid reported and audited is the helper itself and not a launcher that owns it. The child's output appends to `data/logs/watch.log`, the file `run` already writes, and it takes the backend URL from the environment `run` exports, so not even a port is interpolated into anything. Refusals are sentences: 503 off macOS, 503 when the `watch` extra is not installed here, and 409 when a helper started this way is already running, because two always-on-top overlays over one screen help nobody. `GET /api/watch` reports the same availability, so the UI shows the reason instead of offering a dead button, and the running helper it reports is one this backend started — a helper the operator ran from a terminal is their own and the endpoint does not police it.
+
+Each launch appends `watch.launch` to the hash-chained log with the exact argv, the working directory, the log path and the pid it started, because beginning to capture the operator's own display is an operator decision about special-category data and belongs in the chain beside the others (invariant 6, section 12). A launch whose entry cannot be written terminates the helper rather than leave an unaudited process that can read a screen. None of this widens section 2, because pressing the button starts an application and not a capture: the helper draws its panel and captures nothing until somebody at that machine picks a window, display or region in it and presses Start there. Nothing else may start it — no start-on-load, no retry after a refusal, and no status poll that restarts anything — and it is loopback-only by construction, because the listener is (invariant 11).
+
 ## 7. Data model
 
 One DB for all cases. IDs are UUIDv7. Persons and templates are global. Media and all rows derived from media carry a case.
@@ -406,6 +410,12 @@ POST   /api/live/match                 multipart frame + optional case_id + opti
                                        identify (default true) -> boxes and, when
                                        identify is true, ranked candidates. The response
                                        echoes `identified`. Advisory, persists nothing (6.10)
+GET    /api/watch                      {available, platform_supported, extra_installed,
+                                       running, pid, reason}
+POST   /api/watch/launch               no body -> {pid, log_path}. Starts the watch helper
+                                       on this machine from a frozen argv, audited as
+                                       `watch.launch`. 503 off macOS or without the `watch`
+                                       extra, 409 when one started this way runs (6.11)
 GET    /api/media?status=
 GET    /api/media/{id}
 GET    /api/media/{id}/file            range requests for video
@@ -543,7 +553,8 @@ face-match/
                        matching.py, reembed.py, capture.py, live.py
     app/db/            conn.py, migrate.py, migrations/
     app/audit.py, app/worker.py, app/jobs.py, app/config.py, app/purge.py,
-    app/runtime_config.py, app/models_lock.py, app/thresholds.py, app/cli.py
+    app/runtime_config.py, app/models_lock.py, app/thresholds.py, app/cli.py,
+    app/watch_launch.py
     tests/
   models/              ONNX files (gitignored) + models.lock (tracked)
   tools/fetch_models.py  build-time weight provisioning, pinned by SHA-256.

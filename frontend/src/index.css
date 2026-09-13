@@ -193,6 +193,10 @@ tbody tr:hover { background: #1d2128; }
 
 .image-stage video { display: block; width: 100%; height: min(68vh, 48rem); background: #08090b; object-fit: contain; }
 .live-safety { margin-bottom: 0.9rem; border-left-color: var(--possible); color: var(--text); }
+/* The out-of-browser launcher (spec 6.11): its button and the one sentence that
+   explains it share a line, and the outcome of a press sits under both. */
+.watch-helper { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.7rem; margin-bottom: 0.9rem; }
+.watch-helper p { flex-basis: 100%; }
 .live-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 0.8rem 1.2rem; margin-bottom: 1rem; }
 .live-controls label { min-width: 11rem; }
 .live-hud { display: flex; flex-wrap: wrap; gap: 0.3rem 1.1rem; margin: 0 0 0 auto; color: var(--muted); }

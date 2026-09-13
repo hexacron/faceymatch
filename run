@@ -126,6 +126,11 @@ trap cleanup INT TERM EXIT
 
 # --------------------------------------------------------------------- start
 
+# The helper reads its backend URL from the environment (`watch/config.py`). Exporting it
+# here is what lets a helper the API starts on request (POST /api/watch/launch, spec 6.11)
+# find this install on a non-default port without a port reaching any command line.
+export FACEYMATCH_URL="http://$HOST:$PORT"
+
 say "API on http://$HOST:$PORT"
 (cd "$BACKEND" && exec uv run uvicorn app.main:app --host "$HOST" --port "$PORT" --workers 1) \
   >>"$LOG_DIR/api.log" 2>&1 &

@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     db_path: Path = REPO_ROOT / "data" / "facematch.db"
     media_dir: Path = REPO_ROOT / "data" / "media"
     crops_dir: Path = REPO_ROOT / "data" / "crops"
+    # `run` writes api.log, worker.log and watch.log here, and the watch helper the API
+    # starts appends to the same watch.log (spec 6.11).
+    logs_dir: Path = REPO_ROOT / "data" / "logs"
     models_dir: Path = REPO_ROOT / "models"
     frontend_dist: Path = REPO_ROOT / "frontend" / "dist"
     fixtures_dir: Path = REPO_ROOT / "fixtures"
