@@ -15,7 +15,7 @@ select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "SIM", "RUF", "ANN", "S"]
 ignore = ["ANN401"]
 
 [lint.isort]
-known-first-party = ["app", "metrics"]
+known-first-party = ["app", "metrics", "watch"]
 
 [lint.per-file-ignores]
 "**/tests/*" = ["S101"]

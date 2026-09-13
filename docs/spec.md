@@ -1,8 +1,21 @@
 # Local Face Match System: Design Spec
 
-Version: 0.5
+Version: 0.6
 Owner: Brock
 Status: All core decisions closed. Proposed items can change during build.
+
+Changes from 0.5:
+
+- New section 6.11: a local watch helper (`backend/watch/`) that the operator starts, points at one window, display or region of their own machine, and stops. It matches through the same `POST /api/live/match` as the Live view and stores nothing of its own; enrolment goes through `POST /api/media` and the existing tag panel. It is not monitoring: there is no alerting, no recording, no schedule, and it dies with its window.
+- `POST /api/live/match` takes an optional `identify` form field (default true). `identify=false` returns boxes and the quality verdict only — no alignment, no embedding, no gallery scoring — so a client can track faces at detector latency and ask for names less often. The response echoes it as `identified`, because an empty candidate list otherwise cannot be told from a frame nobody was asked to identify. Persisting nothing is unchanged, and invariant 13 is untouched: a boxes-only frame is even further from evidence than an identify frame.
+- `models.lock` verification is once per process per model configuration, not once per job (6.3). Invariant 8 is about refusing to run weights whose bytes moved; re-hashing the same files between two jobs of the same model proves nothing the first verification did not.
+- Performance work across the pipeline, all of it numerics-preserving and none of it touching the execution provider, graph optimisation level or any weight file. Measured by `tools/bench_perf.py` (section 11).
+- Section 7 records the SQLite connection policy (pooled per thread, PRAGMAs) and migration `0004_perf_indices`.
+- The live view samples at two cadences: every third tick identifies at the evidence resolution, the rest ask for boxes only at 1 MP. Only identify frames are retained, so a click still stores the exact bytes the gallery scored (invariant 13, 6.10). Labels carry across boxes-only ticks by IoU against the last identify pass.
+- Overlay labels are drawn only for the hovered box and the selected box (6.8). A caption over every box hides the faces underneath it.
+- Person purge is implemented (section 12, `DELETE /api/persons/{id}`): the person, their templates, and every identity, identification and match naming them, in every case. The evidence stays. A bin icon on the persons library, one click to confirm; the audit entry hashes the name.
+- The backend gzips its responses and the production bundle ships without a sourcemap.
+- Section 11 distinguishes targets from measurements and names the harness that produces the measurements.
 
 Changes from 0.4:
 
@@ -74,7 +87,7 @@ In scope:
 Out of scope for v1:
 
 - Camera and sensor capture: webcams, phone cameras, capture cards, RTSP and other network streams. No video capture device is ever a source.
-- Unattended or continuous monitoring, and alerting. No always-on watcher, and no matching of a stream the operator is not actively looking at. Operator-initiated screen capture and operator-initiated live match of the operator's own display are in scope (6.10): each is one explicit action on pixels already on that operator's screen.
+- Unattended or continuous monitoring, and alerting. No always-on watcher, and no matching of a stream the operator is not actively looking at. Operator-initiated screen capture and operator-initiated live match of the operator's own display are in scope (6.10): each is one explicit action on pixels already on that operator's screen. The watch helper (6.11) is in scope on the same terms — the operator starts it, points it at one surface of their own machine, and stops it — and it is bounded by that: no alert, no recording, no schedule, and no life beyond the window it follows.
 - Age, gender, emotion, or any attribute estimation. Do not ship these models.
 - Face search against the open web or third-party services.
 - Mobile clients. Multi-site sync.
@@ -194,7 +207,8 @@ Rules:
 - Never compare embeddings from different `model_id` values.
 - Store `model_id` with every embedding, template, and match.
 - A model switch re-embeds templates and tracks. Provide a CLI job.
-- Verify each model file SHA-256 against `models.lock` at start. Refuse to start on mismatch.
+- Verify each model file SHA-256 against `models.lock` at start. Refuse to start on mismatch. The API process verifies in `startup_checks`; the worker verifies on its first job and caches the result per `(models_dir, detector, embedder)`, so a configuration change re-verifies before the new model is used but two jobs of the same model do not re-hash 203 MB between them.
+- The read path that reports whether a model *could* be selected (`GET /api/config`, `runtime_config.blocked_reason`) memoises digests on `(path, size, mtime_ns)`. Selection itself keeps the uncached hash: `PATCH /api/config` is the moment the bytes are proved, and a stat tuple is not proof.
 - `models.lock` records the license of each file. Refuse to load a non-commercial model unless `allow_noncommercial_models` is true (C7). That setting is an audited operator decision, not an environment-only flag: turning it on requires a reason and is recorded in the audit chain, and the license text stays visible in `GET /api/models`, `GET /api/config` and the C7 banner whether it is on or off. `models.lock` verification itself does not move (invariant 8) — unknown or SHA-mismatched weights are refused regardless of any setting, because that is integrity, not licensing.
 - Turning `allow_noncommercial_models` off while a non-commercial model is the active detector or embedder is refused (409), naming the active model and the remedy. Forcing the embedder back would re-embed the whole gallery as a side effect of a checkbox; one `PATCH` carrying both keys does it deliberately, with the ordinary model-switch consequences (6.2 re-embed, re-match, auto-accept off until recalibration).
 - SFace is the shipped default embedder. buffalo_l loads only once `allow_noncommercial_models` is turned on, so a fresh clone starts in a permissively licensed state.
@@ -252,7 +266,8 @@ Player overlay:
 - On load and on seek, fetch tracks for a time window around `currentTime`.
 - Draw with `requestVideoFrameCallback`. Interpolate boxes linearly between stored samples, so boxes stay smooth at 3 fps sampling.
 - Sync canvas size with `ResizeObserver` and `devicePixelRatio`. Map through the `object-fit` letterbox of the media element.
-- Box color by band. Label: name, band, score, track ID. Mark operator-confirmed identities with a distinct badge.
+- Box color by band. Mark operator-confirmed identities with a distinct badge.
+- Labels are on demand, not always on. The caption (name, band, score, track ID) is drawn only for the box under the cursor and for the selected box; the rest are outlines. A frame with 24 detections is 24 captions over the faces the operator is trying to look at, and the live view's quality-gate reasons are long enough to cover a face on their own. The track list beside the media carries the same text for every box at once, so nothing is hidden — it is moved off the picture. Hovering also thickens the box, so the pointer's target is unambiguous before a click selects it.
 
 Tag panel:
 
@@ -288,11 +303,23 @@ Tier 1, evidence. `POST /api/capture` (macOS only) captures the screen with the 
 
 Tier 2, live match. `POST /api/live/match` takes one frame and runs detect, quality gate, align, embed, gallery match and band assignment through the same `Detector`, `Embedder`, active threshold set and band rules as 6.2 and 6.4. It persists nothing: no `media`, `detections`, `detection_embeddings`, `tracks`, `matches`, `identities`, `identifications` or `templates` row, no stored crop, no per-frame audit entry. It is a read-only query against the gallery, safe to call repeatedly while the operator browses. The answer is advisory. The auto-accept gate is reported so the UI can say why nothing self-confirms, but no live face is ever accepted: auto-acceptance is a property of stored matches (invariant 4, D16).
 
+The optional `identify` field (default true) stops the chain after the quality gate. With `identify=false` no crop is warped, nothing is embedded and no gallery row is scored; the response carries the same boxes and the same quality verdicts with empty candidate lists, `identified: false`, and `embed` and `match` timings of 0.0. The gallery and the auto-accept gate are still read — both are cached — so `gallery_persons` and `auto_accept_allowed` mean what they always mean. This exists because a box that tracks a moving face is worth more to the operator than a name that arrives a third of a second late, and embedding is most of that third of a second. It weakens nothing: a boxes-only frame does strictly less than an identify frame and still stores nothing.
+
 Because tier 2 stores nothing, nothing in a live frame can be tagged or enrolled (invariant 13). Acting on a face the operator sees requires tier 1 first: capture it as evidence, then decide on the resulting detection.
 
 The tier 2 gallery loads once per `embedder_model_id` as one `(templates, dim)` matrix, cached and keyed on the audit chain head hash. Invariant 6 makes that head a total version counter for the database, so a cached matrix cannot outlive a template, person-status or embedding change, and the freshness check costs one indexed read per frame instead of a gallery reload.
 
-Measured on an M5 with CoreML, 1080p frames: 9 ms with no face, 24 ms with one, 40 ms with three. Embedding dominates at about 12 ms per quality-passing face, because the SFace graph has a fixed batch of 1. Loopback HTTP adds 1 to 3 ms. The response carries per-stage timings so the client sets its own sampling interval from measurement; one request in flight, frames dropped rather than queued.
+Measured on an M5 with CoreML by `tools/bench_perf.py` (section 11), 1080p frames against a 1000-person, 5000-template gallery: 18 ms with no face, 31 ms with one, 38 ms with three. Decode and detect dominate an empty frame. Embedding is about 11 ms for one quality-passing face and about 17 ms for three: the SFace graph has a fixed batch of 1, so one Run per crop is forced, but `Session.run` releases the GIL and the adapter overlaps the Runs on a pool bounded at four, which is worth 2.0x at three crops and above. Gallery scoring is 0.35 ms at three faces. Loopback HTTP adds 1 to 3 ms. The response carries per-stage timings so the client sets its own sampling interval from measurement; one request in flight, frames dropped rather than queued.
+
+The live view runs two cadences over one serial loop. Every third tick is an identify pass encoded at the evidence budget (16.8 MP cap, JPEG q0.92); the other two ask for boxes only at 1 MP and q0.7, which is roughly 13 ms per megapixel of encode and wire against roughly 103 ms. Boxes therefore track the face at detector latency while names refresh at fps/3. Only identify frames are retained for a click, because those are the exact bytes the gallery scored and the only ones fit to become evidence; a box with no identity behind it renders as `identifying…` and refuses to persist. A box inherits the label of the identify face it overlaps by IoU >= 0.3, the same measure the live-to-stored handoff uses, so a name never moves onto a different face. The HUD shows the per-stage timings and which cadence produced the current boxes, and the loop sizes its period from the measured round trip rather than the backend's own figure — encode and wire are most of what a slow machine cannot keep up with.
+
+### 6.11 Watch helper
+
+The Live view can only match what the operator is looking at, because a hidden tab throttles its sampling loop to nothing. The watch helper is the same tier 2 match with a different surface: a small PySide6 application the operator starts, which captures one chosen window, display or dragged region at the configured sample rate, posts each frame to `POST /api/live/match`, and draws the returned boxes, each labelled with its match, on an always-on-top overlay sized to the target. The overlay window itself takes no input; each box and its label is covered by a small transparent window that does, so a click on a face is the helper's and every other pixel — including the telemetry block the overlay draws, which is a readout and not a button — passes through to the window underneath. It holds no database handle and no model session — it is an HTTP client of the local backend and nothing else — so every rule the endpoint enforces still holds, and a watched frame is as transient as a live one.
+
+Enrolment from the helper is the tier 1 path, unchanged: the operator clicks a face — on the overlay box itself or on its row in the panel — the retained identify frame is posted to `POST /api/media` as `acquisition = screen_capture`, and the browser opens on `#/media/{id}/box/x,y,w,h` so the decision is made against the stored detection (invariant 13). The overlay offers the action and nothing else: no identity is written from a transient frame, and a click on a box with no identity behind it refuses with the reason instead.
+
+It is operator-initiated and bounded, which is what keeps it outside the monitoring ban in section 2: it starts on a click, watches exactly one surface the operator picked, raises no alert, records no video, and stops when the operator stops it or the window it was following closes.
 
 ## 7. Data model
 
@@ -359,6 +386,8 @@ audit_log(seq, ts, actor, case_id, action, object_type, object_id,
 - `schema_migrations` is written by `app/db/migrate.py`. Migrations are the single source of truth for the schema; there is no `schema.sql`.
 - `jobs.progress` holds a JSON object, not a scalar percentage. It carries the structured checkpoint from 6.2 (last `frame_idx`, last `t_ms`, per-stage counts) for pipeline jobs, and the verification outcome for an `audit_verify` job.
 - Chain verification runs as an `audit_verify` job rather than a script, so its result is itself appended to the chain. M0 ships the job worker with `audit_verify` as its one registered handler, before any media pipeline exists.
+- Connection policy (`app/db/conn.py`): WAL, `synchronous = FULL`, foreign keys on, a 10 s busy timeout, 64 MiB page cache, 256 MiB mmap and in-memory temp store. `synchronous` stays FULL — the audit log is the evidence, and its durability is not tradeable for write speed. The API holds one connection per (thread, database) for the life of the process rather than opening one per request, because opening one re-runs every PRAGMA and discards the page cache it just declared. Writes still serialise through `BEGIN IMMEDIATE`, so the single-writer property section 9 depends on is unchanged, and a request that returns with a transaction still open has it rolled back before the connection is reused.
+- Migration `0004_perf_indices` adds three indices for queries that were scanning whole tables: `tracks (embedder_model_id) WHERE embedding_mean IS NOT NULL` for re-match, `matches (band, score DESC) WHERE rank = 1` for the review queue, and `jobs (json_extract(params_json, '$.media_id'))` for the latest-job-per-media join in the media list. A re-match scoped to specific tracks filters them in SQL, chunked at 500 bound ids, rather than loading every track and filtering in Python.
 
 ## 8. API contract (v1)
 
@@ -373,8 +402,10 @@ POST   /api/media/import               {folder_path} -> {job_ids[]}
 POST   /api/capture                    {case_id, mode, source_url} ->
                                        {media_id, sha256, job_id, reused}
                                        macOS screen capture, ingested as evidence (6.10)
-POST   /api/live/match                 multipart frame + optional case_id -> boxes and
-                                       ranked candidates. Advisory, persists nothing (6.10)
+POST   /api/live/match                 multipart frame + optional case_id + optional
+                                       identify (default true) -> boxes and, when
+                                       identify is true, ranked candidates. The response
+                                       echoes `identified`. Advisory, persists nothing (6.10)
 GET    /api/media?status=
 GET    /api/media/{id}
 GET    /api/media/{id}/file            range requests for video
@@ -409,7 +440,10 @@ GET    /api/graph?case_ids=&min_weight=&source=&from=&to=
 GET    /api/export?case_id=&format=bundle|graphml|csv|maltego
 
 DELETE /api/cases/{id}                purge case (section 12)
-DELETE /api/persons/{id}              purge person across all cases
+DELETE /api/persons/{id}              purge person across all cases (section 12). No body;
+                                      404 when they are already gone
+  resp: {person_id, templates, identities, identifications, matches,
+         clusters_unlabelled, rematch_job_id}
 GET    /api/audit?from_seq=
 GET    /api/healthz                    db, models.lock, active threshold set, execution
                                        provider, screen-capture capability
@@ -470,6 +504,10 @@ Targets, not measurements. Verify in M1 and M2.
 | Overlay redraw during playback | Display rate |
 | Track fetch per 10 s window | < 50 ms |
 
+Measurements come from `tools/bench_perf.py`, which builds a scratch database in a temp directory, seeds a synthetic 1000-person gallery, loads the real weights through the ordinary registry, and reports medians as one JSON object: per-frame stage timings at three resolutions and three face counts, embed at 1/3/8 crops, one `process_image`, one full `rematch`, `models_lock.verify`, and `runtime_config.blocked_reason`. It never opens `data/facematch.db`. A change that claims a speedup quotes its output before and after.
+
+A measurement is only comparable against another run of that script on the same machine. It is also not a numerics check: any change to the execution provider, provider options, graph optimisation level or a re-exported weight file moves scores while the active calibrated threshold set still looks valid, because `acceptance.build_gate` compares only the provider name. Re-running `eval/run.py` against a scratch DB and comparing `t_strong`, `t_possible` and `margin` to the active set is the check that catches that.
+
 ## 12. Security and privacy
 
 - Bind the server to `127.0.0.1` only (invariant 11). Remote access is a `tailscale serve` proxy in front of that loopback listener. Never bind a tailnet IP, and never bind `0.0.0.0`.
@@ -479,8 +517,9 @@ Targets, not measurements. Verify in M1 and M2.
 - The global gallery removes case compartments. Any enrolled person can match in any case. Record the enrolling case and its `authorization_basis` on each person.
 - Case purge removes the case media, crops, detections, tracks, and all templates sourced from that case. Then it re-matches affected persons in other cases.
 - A case purge that strands a person at zero active templates sets `persons.status = 'unenrolled'`. The person row survives, so audit and identification history stay readable. An `unenrolled` person is excluded from matching, and the following re-match reverts that person's auto-accepted identities to unknown. Operator-confirmed identities survive (invariant 5).
-- Person purge removes the person, all templates, and all identities in every case.
-- The audit log keeps purge entries with hashes only.
+- Person purge (`DELETE /api/persons/{id}`) removes the person, all their templates — revoked ones included — and every identity, identification and match naming them, in every case. It does not touch the evidence those claims were made from: the media, the detections and the stored crops stay, because they record what was in the picture rather than who it was. Re-processing the same file afterwards finds the same faces and names nobody, which is the correct end state. A cluster labelled with the person keeps its membership and loses the label.
+- A purge is irreversible, and the guard is a single confirm click on the bin icon in the persons library — not a typed name and not a written justification. A form that has to be argued with gets clicked through rather than read, and the operator clearing their own gallery is the ordinary case rather than the dangerous one. The purge queues a re-match, since the gallery it removed a person from is the one every stored auto score was measured against. Deleting a person who is already gone is a 404 that writes nothing.
+- The audit log keeps purge entries with hashes only. A `person.purge` entry carries the person id, the counts of what was removed, and the SHA-256 of the display name — never the name. A log that reprints the personal data it just deleted has not deleted it.
 - `do_not_enroll` on a person blocks template creation and auto-acceptance for that person.
 - No identity, identification or template may derive from transient pixels (invariant 13). The live match path (6.10) stores nothing and therefore cannot enroll or tag. Enrollment and tagging act only on a stored detection whose source media was hashed and content-addressed at ingest, so a biometric claim stays re-checkable against the bytes it was made from.
 - `authorization_basis` is correctable and every correction is audited. `PATCH /api/cases/{id}` writes the new text and appends `case.amend_authorization` in the same transaction, carrying the previous text, the new text and the operator's reason. A basis that no longer describes the material is worse than no basis, and a silent overwrite would destroy the record of what processing was justified under. The correction is evidence too.
@@ -490,27 +529,33 @@ Targets, not measurements. Verify in M1 and M2.
 
 ```
 face-match/
-  frontend/            React + Vite + TS
-    src/player/        overlay, interpolation, hit-test
-    src/tagging/
-    src/review/
-    src/clusters/
-    src/graph/
+  frontend/            React + Vite + TS, built to frontend/dist and served by the backend
+    src/views/         one file per route: media library, media detail, live,
+                       persons, person detail, review, status, config
+    src/components/    shared pieces (band pill, loading, case basis, notices)
+    src/lib/           router, resource polling, geometry, live frame plumbing
+    src/api/           client.ts, types.ts (the wire contract, hand-written)
   backend/
-    app/api/           routers
-    app/core/          interfaces, scoring, acceptance, config
+    app/api/           routers + deps.py (connection pool, effective settings)
+    app/core/          interfaces, registry, scoring, acceptance, vectors, storage
     app/adapters/      yunet.py, sface.py, arcface_r50.py
-    app/pipeline/      ingest.py, decode.py, track.py, quality.py,
-                       align.py, cluster.py, rematch.py
-    app/db/            conn.py, migrate.py, migrations/, vec.py
-    app/audit.py
-    app/worker.py
+    app/pipeline/      ingest.py, decode.py, quality.py, align.py, process.py,
+                       matching.py, reembed.py, capture.py, live.py
+    app/db/            conn.py, migrate.py, migrations/
+    app/audit.py, app/worker.py, app/jobs.py, app/config.py, app/purge.py,
+    app/runtime_config.py, app/models_lock.py, app/thresholds.py, app/cli.py
+    tests/
   models/              ONNX files (gitignored) + models.lock (tracked)
   tools/fetch_models.py  build-time weight provisioning, pinned by SHA-256.
                        Standalone: imports nothing from app/, so the runtime
                        package contains no download code at all (C1).
-  eval/
+  tools/bench_perf.py    performance harness (section 11). Imports app/, runs
+                       against a scratch DB, never touches data/.
+  eval/                run.py, metrics.py (section 10)
+  data/                gitignored: facematch.db, media/, crops/, logs/
+  fixtures/            gitignored face images for tests and calibration
   docs/spec.md
+  README.md
   docker-compose.yml
   LICENSE              MIT
 ```

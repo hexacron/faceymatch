@@ -23,6 +23,14 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
 ]
+# The operator-started watch helper (spec 6.11). Kept out of the runtime dependency set so
+# a plain `uv sync` never pulls Qt onto a server that only serves the API, and out of the
+# wheel by `[tool.hatch.build.targets.wheel] packages = ["app"]`.
+watch = [
+    "PySide6>=6.8",
+    "mss>=10.0",
+    "pyobjc-framework-Quartz>=11.0; sys_platform == 'darwin'",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -39,12 +47,12 @@ packages = ["app"]
 python_version = "3.12"
 strict = true
 # `eval/` is real, shipped code (spec section 10), so it type-checks with `app`.
-files = ["app", "../eval", "../tools"]
+files = ["app", "watch", "../eval", "../tools"]
 mypy_path = ".:../eval"
 warn_unreachable = true
 
 [[tool.mypy.overrides]]
-module = ["sqlite_vec", "onnxruntime"]
+module = ["sqlite_vec", "onnxruntime", "mss.*", "Quartz", "objc"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
