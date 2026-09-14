@@ -21,6 +21,10 @@ const SKIPS_SHOWN = 20;
 export function FolderEnroll({ caseId, onImported }: { caseId: string; onImported: () => void }) {
   const [path, setPath] = useState("");
   const [reason, setReason] = useState("");
+  // Ticked by default: a panel titled "Folder of faces" is opened by an operator who wants
+  // faces. The API default stays false, so nothing else that calls the endpoint destroys
+  // anything it was not asked to.
+  const [facesOnly, setFacesOnly] = useState(true);
   const [busy, setBusy] = useState<"import" | "enroll" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [imported, setImported] = useState<MediaImport | null>(null);
@@ -42,7 +46,7 @@ export function FolderEnroll({ caseId, onImported }: { caseId: string; onImporte
     setBusy("import");
     setError(null);
     try {
-      setImported(await importFolder(caseId, path.trim()));
+      setImported(await importFolder(caseId, path.trim(), facesOnly));
       onImported();
     } catch (failure) {
       report("import that folder", failure);
@@ -113,6 +117,20 @@ export function FolderEnroll({ caseId, onImported }: { caseId: string; onImporte
         </button>
       </div>
 
+      <label className="checkbox-label">
+        <input
+          type="checkbox"
+          checked={facesOnly}
+          onChange={(event) => setFacesOnly(event.currentTarget.checked)}
+        />
+        Only keep files with a face
+      </label>
+      <p className="compact muted">
+        Every file is registered and hashed first, because that is the only way to find out what
+        is in it. A file the detector finds no face in is then deleted — its row, its bytes and
+        its derived rows — and the deletion is recorded in the audit log.
+      </p>
+
       {reasonMissing && (
         <p className="field-error">
           Bulk enrolment is only accepted with a stated reason: it creates gallery templates.
@@ -123,6 +141,7 @@ export function FolderEnroll({ caseId, onImported }: { caseId: string; onImporte
         <p className="compact" role="status">
           {imported.media_ids.length} files registered, {imported.job_ids.length} queued,{" "}
           {imported.reused} already in this case.
+          {facesOnly ? " Files with no face are removed as they are processed." : ""}
         </p>
       )}
 

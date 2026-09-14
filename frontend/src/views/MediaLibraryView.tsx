@@ -74,10 +74,18 @@ export default function MediaLibraryView() {
   const cases = useResource<CaseList>("/api/cases");
   const health = useResource<Health>("/api/healthz");
   const caseId = useSelectedCase();
-  const mediaPath = useMemo(
-    () => (caseId === "" ? "/api/media" : `/api/media?case_id=${encodeURIComponent(caseId)}`),
-    [caseId],
-  );
+  const [faces, setFaces] = useState<"" | "true" | "false">("");
+  const mediaPath = useMemo(() => {
+    const params = new URLSearchParams();
+    if (caseId !== "") {
+      params.set("case_id", caseId);
+    }
+    if (faces !== "") {
+      params.set("has_faces", faces);
+    }
+    const suffix = params.toString();
+    return suffix === "" ? "/api/media" : `/api/media?${suffix}`;
+  }, [caseId, faces]);
   const media = useResource<MediaList>(mediaPath, 1_000);
   const fileRef = useRef<HTMLInputElement>(null);
   const [sourceUrl, setSourceUrl] = useState("");
@@ -108,12 +116,12 @@ export default function MediaLibraryView() {
     }
   }, [health.state]);
 
-  // A selection is about the case on screen: switching cases must not carry ids
-  // from the last one into a delete.
+  // A selection is about the list on screen: switching case or filter must not carry ids
+  // that are no longer visible into a delete.
   useEffect(() => {
     setSelected(new Set());
     setConfirmingBulk(false);
-  }, [caseId]);
+  }, [caseId, faces]);
 
   function toggleSelected(mediaId: string): void {
     setSelected((current) => {
@@ -391,6 +399,19 @@ export default function MediaLibraryView() {
               <option value="list">List</option>
             </select>
           </label>
+          <label>
+            Faces
+            <select
+              value={faces}
+              onChange={(event) =>
+                setFaces(event.currentTarget.value as "" | "true" | "false")
+              }
+            >
+              <option value="">All files</option>
+              <option value="true">With faces</option>
+              <option value="false">Without faces</option>
+            </select>
+          </label>
         </div>
         {notice !== null && (
           <p
@@ -404,7 +425,9 @@ export default function MediaLibraryView() {
           {(list) => {
             const chosen = list.items.filter((item) => selected.has(item.id));
             return list.items.length === 0 ? (
-              <p className="notice">This case has no media yet.</p>
+              <p className="notice">
+                {faces === "" ? "This case has no media yet." : "No files match that filter."}
+              </p>
             ) : (
               <>
                 <div className="bulk-bar panel">

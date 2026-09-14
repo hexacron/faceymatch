@@ -93,6 +93,8 @@ class MediaUploadOut(BaseModel):
 class MediaImportIn(BaseModel):
     case_id: str = Field(min_length=1)
     folder_path: str = Field(min_length=1)
+    # Conservative default: nothing is destroyed unless the request asks for it.
+    faces_only: bool = False
 
 
 class MediaImportOut(BaseModel):
@@ -227,7 +229,11 @@ def upload_media(
 
 @router.post("/import", response_model=MediaImportOut, status_code=status.HTTP_202_ACCEPTED)
 def import_folder(body: MediaImportIn, conn: ConnDep, settings: SettingsDep) -> MediaImportOut:
-    """Recursive folder import: one `process` job per newly registered file (spec 6.1)."""
+    """Recursive folder import: one `process` job per newly registered file (spec 6.1).
+
+    With `faces_only`, every file is still hashed and registered — that is the only way to
+    find out what is in it — and the worker purges the ones the detector found no face in.
+    """
     folder = Path(body.folder_path).expanduser()
     try:
         results = ingest_folder(
@@ -236,6 +242,7 @@ def import_folder(body: MediaImportIn, conn: ConnDep, settings: SettingsDep) -> 
             case_id=body.case_id,
             folder=folder,
             actor=settings.operator_name,
+            faces_only=body.faces_only,
         )
     except CaseNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -257,6 +264,7 @@ def list_media(
         Literal["new", "processing", "done", "failed"] | None, Query(alias="status")
     ] = None,
     case_id: Annotated[str | None, Query()] = None,
+    has_faces: Annotated[bool | None, Query()] = None,
 ) -> MediaListOut:
     """Library listing. Latest job and detection count come from SQL, never an N+1 fetch."""
     where: list[str] = []
@@ -267,6 +275,17 @@ def list_media(
     if case_id is not None:
         where.append("m.case_id = ?")
         params.append(case_id)
+    if has_faces is not None:
+        # Only a processed file can answer this: one still queued has no detections yet and
+        # is not the same thing as a file with no face in it. The subquery is repeated
+        # rather than reusing `_MEDIA_SELECT`'s `detection_count`, which is computed in the
+        # SELECT list and is not addressable from WHERE without wrapping the statement.
+        where.append("m.status = 'done'")
+        where.append(
+            "EXISTS (SELECT 1 FROM detections d2 WHERE d2.media_id = m.id)"
+            if has_faces
+            else "NOT EXISTS (SELECT 1 FROM detections d2 WHERE d2.media_id = m.id)"
+        )
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     rows = conn.execute(
         f"{_MEDIA_SELECT} {clause} ORDER BY m.ingested_at DESC, m.id DESC",

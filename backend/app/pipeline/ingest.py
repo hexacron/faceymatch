@@ -84,8 +84,12 @@ def ingest_file(
     source_url: str | None = None,
     actor: str,
     acquisition: Acquisition = UPLOAD,
+    faces_only: bool = False,
 ) -> IngestResult:
     """Register one image or video in `case_id` and queue its processing job.
+
+    With `faces_only`, the queued job carries the flag through to the worker, which is the
+    first place the answer "does this file hold a face" exists (spec 6.1).
 
     Raises `UnsupportedImageError` for a suffix we do not decode, `CorruptImageError` for
     bytes that are not a readable image, `VideoDecodeError` for a video that will not open,
@@ -168,11 +172,15 @@ def ingest_file(
             reused=True,
         )
 
+    params: dict[str, object] = {"media_id": media_id}
+    if faces_only:
+        # Only when asked, so an ordinary import's job params keep the shape they have had.
+        params["faces_only"] = True
     job = jobs.enqueue(
         conn,
         kind="process",
         actor=actor,
-        params={"media_id": media_id},
+        params=params,
         case_id=case_id,
     )
     return IngestResult(media_id=media_id, sha256=digest, job_id=job.id, reused=False)
@@ -185,11 +193,15 @@ def ingest_folder(
     case_id: str,
     folder: Path,
     actor: str,
+    faces_only: bool = False,
 ) -> list[IngestResult]:
     """Recursive folder import: one job per decodable file, unsupported suffixes skipped.
 
     A single unreadable file does not abort the import. It is recorded as
     `media.ingest_failed` in the audit chain so the skip is evidence, not silence.
+
+    A file whose bytes are already in this case keeps the job it already has, so a
+    faces-only re-import does not retroactively mark files an earlier import registered.
     """
     if not folder.is_dir():
         raise NotADirectoryError(f"not a directory: {folder}")
@@ -207,6 +219,7 @@ def ingest_folder(
                     source_url=None,
                     actor=actor,
                     acquisition=FOLDER_IMPORT,
+                    faces_only=faces_only,
                 )
             )
         except decode.ImageDecodeError as exc:

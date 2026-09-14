@@ -35,10 +35,15 @@ from app.pipeline.process import (
     process_video,
 )
 from app.pipeline.reembed import reembed
+from app.purge import purge_media
 
 log = logging.getLogger("app.worker")
 
 Handler = Callable[[sqlite3.Connection, Job, Settings], dict[str, Any]]
+
+# Recorded on the `media.purge` audit entry a faces-only import writes, so an automatic
+# drop is distinguishable in the chain from an operator pressing the bin.
+PURGE_REASON_NO_FACES = "no faces at import"
 
 
 class UnknownJobKindError(RuntimeError):
@@ -105,17 +110,37 @@ def handle_process(
         # The job id goes in because a video checkpoints into its own `jobs.progress` and
         # resumes from it after a kill (spec 6.2, "Job resume"). A still has nothing to
         # resume: it is one frame and one transaction.
-        return process_video(
+        result = process_video(
             conn,
             settings,
             active,
             media_id=media_id,
             actor=settings.operator_name,
             job_id=job.id,
-        ).as_progress()
-    return process_image(
-        conn, settings, active, media_id=media_id, actor=settings.operator_name
-    ).as_progress()
+        )
+    else:
+        result = process_image(
+            conn, settings, active, media_id=media_id, actor=settings.operator_name
+        )
+
+    progress = result.as_progress()
+    if job.params.get("faces_only") is True and result.detections == 0:
+        # The operator asked to import faces; the detector found none, so this file is not
+        # what they asked for. Purged rather than left in the library, with the reason in
+        # the chain beside the `media.ingest` entry that put it there.
+        #
+        # No re-match is queued, unlike `DELETE /api/media/{id}`: a file with zero
+        # detections has zero tracks and zero templates, so the gallery every stored score
+        # was measured against has not moved.
+        purge_media(
+            conn,
+            settings,
+            media_id=media_id,
+            actor=settings.operator_name,
+            reason=PURGE_REASON_NO_FACES,
+        )
+        progress["purged_no_faces"] = True
+    return progress
 
 
 def handle_rematch(

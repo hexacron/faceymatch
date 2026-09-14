@@ -167,6 +167,8 @@ Out of scope for v1:
 - Hash each file (SHA-256) before processing. Store content-addressed. Reuse stored bytes when the same file appears in another case.
 - Apply EXIF orientation for images before detection. Store the original unchanged.
 - Folder import: recursive, with a job per file.
+- An import may be asked to keep only the files a face was found in (`faces_only`). Every file is still hashed and registered first, because that is the only way to find out what is in it; a file the detector then found no face in is purged (section 12) once its job has looked at it, with `no faces at import` as the recorded reason, and the job's progress carries `purged_no_faces`. A detection that failed the quality gate still counts as a face: it cannot be enrolled, but it is a face in the picture. A file whose bytes were already in the case keeps the job it already has, so a faces-only re-import does not sweep what an earlier import registered.
+- The library can be filtered on whether a file holds a face (`GET /api/media?has_faces=`), which is how a mixed folder imported without the flag is cleaned up afterwards: filter to the files with no face, select them and delete the selection. Only a processed file answers the filter, because one still queued has not been asked yet and is not the same thing as a file with nothing in it.
 - A still image produces exactly one track per detection, with `start_ms = end_ms = 0`. Images and video therefore share one `tracks`/`identities` code path.
 - The library lists a case's files in two layouts, and the choice is remembered per browser: a gallery of previews, and a list carrying the hash, the dimensions and the job's progress. A preview is `GET /api/media/{id}/thumbnail`, a downscale derived on request from the stored original and never stored; it is a picture to recognise a file by, not evidence, and every decision is still made against the stored detection (invariant 13). Video has no preview until M2 decodes a frame for one.
 - A file can be deleted from the library, one at a time (`DELETE /api/media/{id}`) or as a selection (`POST /api/media/bulk_delete`), both section 12.
@@ -418,8 +420,9 @@ PATCH  /api/cases/{case_id}            {authorization_basis, reason?} -> CaseOut
                                        audited correction, keeps the old text (section 12)
 
 POST   /api/media                      multipart upload -> {media_id, sha256, job_id}
-POST   /api/media/import               {case_id, folder_path} ->
-                                       {job_ids[], media_ids[], reused}
+POST   /api/media/import               {case_id, folder_path, faces_only?} ->
+                                       {job_ids[], media_ids[], reused}. faces_only purges
+                                       a file the detector found no face in (6.1, 12)
 POST   /api/capture                    {case_id, mode, source_url} ->
                                        {media_id, sha256, job_id, reused}
                                        macOS screen capture, ingested as evidence (6.10)
@@ -433,7 +436,9 @@ POST   /api/watch/launch               no body -> {pid, log_path}. Starts the wa
                                        on this machine from a frozen argv, audited as
                                        `watch.launch`. 503 off macOS or without the `watch`
                                        extra, 409 when one started this way runs (6.11)
-GET    /api/media?status=
+GET    /api/media?status=&case_id=&has_faces=
+                                       has_faces filters processed files on whether any
+                                       detection was stored for them (6.1)
 GET    /api/media/{id}
 GET    /api/media/{id}/file            range requests for video
 GET    /api/media/{id}/thumbnail?size= derived JPEG preview: a downscale for an image, the

@@ -257,12 +257,21 @@ _MEDIA_PURGE_STEPS: tuple[str, ...] = (
 
 
 def purge_media(
-    conn: sqlite3.Connection, settings: Settings, *, media_id: str, actor: str
+    conn: sqlite3.Connection,
+    settings: Settings,
+    *,
+    media_id: str,
+    actor: str,
+    reason: str | None = None,
 ) -> MediaPurgeResult:
     """Delete one media file, everything derived from it, and its bytes (section 12).
 
     Opens its own transaction: the object and the crops are unlinked afterwards, and a file
     removed for a transaction that then rolled back would be evidence lost to a crash.
+
+    `reason` goes on the audit entry so an automatic drop is distinguishable in the chain
+    from an operator pressing the bin: an operator-initiated purge passes nothing and
+    records `null`.
 
     Raises `MediaNotFoundError` before anything is written, so deleting a file that is
     already gone leaves no trace but the caller's 404.
@@ -332,6 +341,7 @@ def purge_media(
             object_id=media_id,
             payload={
                 "sha256": sha256,
+                "reason": reason,
                 "persons_unenrolled": unenrolled,
                 "object_orphaned": orphan_object,
                 "crops_orphaned": len(orphan_crops),

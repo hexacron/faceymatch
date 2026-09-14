@@ -289,8 +289,16 @@ export async function ingestFile(
  * Neither touches the notice stack: both return a report worth reading, which
  * the folder panel renders itself rather than flattening to one line.
  */
-export async function importFolder(caseId: string, folderPath: string): Promise<MediaImport> {
-  return postJson<MediaImport>("/api/media/import", { case_id: caseId, folder_path: folderPath });
+export async function importFolder(
+  caseId: string,
+  folderPath: string,
+  facesOnly: boolean,
+): Promise<MediaImport> {
+  return postJson<MediaImport>("/api/media/import", {
+    case_id: caseId,
+    folder_path: folderPath,
+    faces_only: facesOnly,
+  });
 }
 
 export async function enrollFolder(
