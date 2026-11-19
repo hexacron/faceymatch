@@ -22,6 +22,7 @@ from app import audit, models_lock, runtime_config
 from app.api import audit as audit_router
 from app.api import capture as capture_router
 from app.api import cases as cases_router
+from app.api import clusters as clusters_router
 from app.api import config as config_router
 from app.api import health as health_router
 from app.api import identifications as identifications_router
@@ -150,6 +151,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health_router.router)
     app.include_router(audit_router.router)
     app.include_router(cases_router.router)
+    app.include_router(clusters_router.router)
     app.include_router(jobs_router.router)
     app.include_router(media_router.router)
     app.include_router(capture_router.router)

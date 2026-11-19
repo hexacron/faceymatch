@@ -26,6 +26,7 @@ from app.core.registry import get_active_models
 from app.db.conn import connect, transaction
 from app.db.migrate import migrate
 from app.jobs import Job, claim_next, finish, requeue_running
+from app.pipeline.clustering import cluster_unknowns
 from app.pipeline.matching import rematch
 from app.pipeline.process import (
     MEDIA_KIND_VIDEO,
@@ -181,11 +182,28 @@ def handle_reembed(
 
 
 
+def handle_cluster(
+    conn: sqlite3.Connection, job: Job, settings: Settings
+) -> dict[str, Any]:
+    scope = job.params["scope"]
+    scope_id = job.params["scope_id"]
+    target = job.params["embedder_model_id"]
+    if target != settings.embedder_model:
+        raise ValueError("active embedder changed since clustering was queued")
+    if scope not in ("media", "job", "case") or not isinstance(scope_id, str):
+        raise ValueError("invalid cluster job scope")
+    return cluster_unknowns(
+        conn, scope=scope, scope_id=scope_id, job_id=job.id,
+        embedder_model_id=target, actor=settings.operator_name,
+    )
+
+
 HANDLERS: dict[str, Handler] = {
     "audit_verify": handle_audit_verify,
     "process": handle_process,
     "rematch": handle_rematch,
     "reembed": handle_reembed,
+    "cluster": handle_cluster,
 }
 
 

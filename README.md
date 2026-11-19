@@ -12,9 +12,9 @@ investigative use raises that bar rather than lowering it. Spec section 12 appli
 Get legal review before any product or case use.
 
 Status: milestones M0 (skeleton, schema, audit chain, job worker), M1 (images end to end
-with a minimal calibration), M1.5 (screen acquisition and live match) and M2 (video decode,
-tracking, matching and a player overlay) are done. M3, clustering, is next. The graph view
-and exports come after it.
+with a minimal calibration), M1.5 (screen acquisition and live match), M2 (video decode,
+tracking, matching and a player overlay), and M3 (unknown-face clustering and reviewed
+enrollment) are done. M4, the graph view and exports, is next.
 
 ## What it does not do
 
@@ -53,10 +53,10 @@ React + Vite + TypeScript on the front end. `uv` and `bun` are the package manag
 Redis, no Postgres, and no Node runtime in production — the backend serves the built
 frontend.
 
-The dependencies named in the spec that are not installed yet are the ones whose milestones
-have not landed: scikit-learn HDBSCAN (clustering, M3) and Sigma.js plus graphology
-(the graph view, M4). `sqlite-vec` is loaded onto every connection but nothing queries it
-yet — matching is a blocked numpy matmul over one in-memory gallery matrix.
+The dependencies named in the spec that are not installed yet belong to later milestones:
+Sigma.js plus graphology (the graph view, M4). `sqlite-vec` is loaded onto every connection
+but nothing queries it yet — matching is a blocked numpy matmul over one in-memory gallery
+matrix. M3 uses scikit-learn HDBSCAN to group stored unknown faces.
 
 Detection is YuNet and embedding is SFace by default, both permissively licensed (MIT and
 Apache-2.0). Three heavier models ship as options and all three are non-commercial research
@@ -150,6 +150,23 @@ case points at them.
 A curated `Person Name/*.jpg` tree becomes persons and templates in one audited request with
 a required reason — "Enrol from folder names", or `POST /api/persons/enroll_folder`. It reads
 the stored detections, never the files, so only an imported file can be enrolled from.
+
+## Reviewing unknown faces
+
+In the **Clusters** tab choose a case, then select **Cluster unknown faces**. HDBSCAN groups
+quality-passing, unidentified stored tracks (minimum three per group); noise remains
+unknown. Clustering itself creates no identities or templates. Review the stored crops
+and their source media, uncheck any mistaken members, then select an existing person or
+name a new one and supply a reason. **Assign** records operator identifications and
+enrolls the selected stored detections as templates; a full re-match is queued so that
+the new person can appear in previously processed media. Rerunning clustering leaves
+already-assigned groups untouched.
+
+The API also accepts `POST /api/jobs/cluster` with `{"scope":"case",
+"scope_id":"<case_id>"}`; valid scopes are `media`, `job` (a completed processing job),
+and `case`. List groups with
+`GET /api/clusters?scope=case:<case_id>` and assign with
+`POST /api/clusters/{id}/assign` (`person_id` or `new_name`, `exclude_track_ids`, `reason`).
 
 ## Calibration
 

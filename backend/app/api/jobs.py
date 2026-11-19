@@ -7,10 +7,10 @@ milestones that implement them.
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.api.deps import ConnDep, SettingsDep
 from app.jobs import JobKind, JobStatus, enqueue, get
@@ -66,6 +66,32 @@ def enqueue_reembed(conn: ConnDep, settings: SettingsDep) -> JobOut:
             "embedder_model_id": settings.embedder_model,
             "reason": "operator_request",
         },
+    )
+    return JobOut(**asdict(job))
+
+
+class ClusterJobIn(BaseModel):
+    scope: Literal["media", "job", "case"]
+    scope_id: str = Field(min_length=1)
+
+
+@router.post("/cluster", response_model=JobOut, status_code=status.HTTP_202_ACCEPTED)
+def enqueue_cluster(body: ClusterJobIn, conn: ConnDep, settings: SettingsDep) -> JobOut:
+    if body.scope == "case":
+        found = conn.execute("SELECT 1 FROM cases WHERE id = ?", (body.scope_id,)).fetchone()
+    elif body.scope == "media":
+        found = conn.execute("SELECT 1 FROM media WHERE id = ?", (body.scope_id,)).fetchone()
+    else:
+        found = conn.execute(
+            "SELECT 1 FROM jobs WHERE id = ? AND kind = 'process' AND status = 'done'",
+            (body.scope_id,),
+        ).fetchone()
+    if found is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="cluster scope not found")
+    job = enqueue(
+        conn, kind="cluster", actor=settings.operator_name,
+        params={"scope": body.scope, "scope_id": body.scope_id,
+                "embedder_model_id": settings.embedder_model},
     )
     return JobOut(**asdict(job))
 

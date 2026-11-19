@@ -173,6 +173,32 @@ export type Job = {
   updated_at: string;
 };
 
+/* ---------------------------------------------------------------- clusters */
+
+export type ClusterTrack = {
+  track_id: string;
+  media_id: string;
+  case_id: string;
+  crop_sha256: string | null;
+};
+
+export type Cluster = {
+  id: string;
+  scope: string;
+  size: number;
+  label_person_id: string | null;
+  tracks: ClusterTrack[];
+};
+
+export type ClusterList = { items: Cluster[] };
+export type ClusterAssignResult = {
+  person_id: string;
+  assigned: number;
+  excluded: number;
+  templates_created: number;
+  rematch_job_id: string;
+};
+
 /* ------------------------------------------------------------------- media */
 
 export type MediaStatus = "new" | "processing" | "done" | "failed";

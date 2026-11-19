@@ -23,6 +23,7 @@ export type Route =
   | { view: "persons" }
   | { view: "person"; personId: string }
   | { view: "review" }
+  | { view: "clusters" }
   | { view: "live" }
   | { view: "config" };
 
@@ -67,6 +68,8 @@ export function parseRoute(hash: string): Route {
       return second === undefined ? { view: "persons" } : { view: "person", personId: second };
     case "review":
       return { view: "review" };
+    case "clusters":
+      return { view: "clusters" };
     case "live":
       return { view: "live" };
     case "config":
@@ -99,6 +102,8 @@ export function hrefFor(route: Route): string {
       return `#/persons/${encodeURIComponent(route.personId)}`;
     case "review":
       return "#/review";
+    case "clusters":
+      return "#/clusters";
     case "live":
       return "#/live";
     case "config":

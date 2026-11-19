@@ -1,4 +1,5 @@
 import { IngestNotices } from "./components/IngestNotices";
+import ClustersView from "./views/ClustersView";
 import ConfigView from "./views/ConfigView";
 import LiveView from "./views/LiveView";
 import MediaDetailView from "./views/MediaDetailView";
@@ -17,6 +18,7 @@ const NAV_ITEMS: readonly NavItem[] = [
   { label: "Live", route: { view: "live" }, activeViews: ["live"] },
   { label: "Persons", route: { view: "persons" }, activeViews: ["persons", "person"] },
   { label: "Review", route: { view: "review" }, activeViews: ["review"] },
+  { label: "Clusters", route: { view: "clusters" }, activeViews: ["clusters"] },
   { label: "Status", route: { view: "status" }, activeViews: ["status"] },
   { label: "Config", route: { view: "config" }, activeViews: ["config"] },
 ];
@@ -38,6 +40,8 @@ function CurrentView({ route }: { route: Route }) {
       return <PersonDetailView key={route.personId} personId={route.personId} />;
     case "review":
       return <ReviewView />;
+    case "clusters":
+      return <ClustersView />;
     case "status":
       return <StatusView />;
     case "config":
